@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>出考率信息填报</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body class="booting">
+    <div class="brandbar">
+      <div class="brandbar-inner">
+        <span class="seal" aria-hidden="true">考</span>
+        <strong>缺考上报系统</strong>
+        <span class="sub" id="orgName"></span>
+      </div>
+      <div class="timing-marks" aria-hidden="true"></div>
+    </div>
+    <main class="page">
+      <section id="closedState" class="closed-state" aria-live="polite">
+        <div class="closed-card" role="status">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+          <h1 id="closedMessage">当前暂无可填报场次，请联系考务管理员</h1>
+          <p>管理员下发场次后，本页会自动恢复，无需手动刷新。</p>
+          <span class="pulse" id="closedPulse">正在等待下发…</span>
+        </div>
+      </section>
+      <div id="flowRoot" class="flow-root">
+      <header id="currentProjectBanner" class="exam-head" aria-live="polite">
+          <p class="exam-kicker">出考率信息填报 · 当前考试</p>
+          <h1 id="currentProjectName">未设置</h1>
+          <p class="exam-date"><span id="currentProjectDate"></span></p>
+          <p class="exam-rule">提交后不能自行修改，填错请联系考务管理员。</p>
+        </header>
+<section class="flow-shell">
+        <nav class="steps" aria-label="填报步骤">
+          <div class="step-pill active" data-step-pill="1">
+            <span>1</span>
+            <strong>选择教室</strong>
+          </div>
+          <div class="step-pill" data-step-pill="2">
+            <span>2</span>
+            <strong>填写人数</strong>
+          </div>
+          <div class="step-pill" data-step-pill="3">
+            <span>3</span>
+            <strong>核对提交</strong>
+          </div>
+        </nav>
+
+        <section class="panel step-panel" data-step="1">
+          <div class="section-title stacked">
+            <h2>第一步：选择教室</h2>
+            <span>系统会根据访问 IP 自动匹配教室，必要时可手动修改。</span>
+          </div>
+          <div id="detectedRoomCard" class="detected-room-card">
+            <span>当前教室</span>
+            <strong id="detectedRoomName">匹配中…</strong>
+            <button id="changeRoomButton" class="button secondary" type="button">
+              修改教室
+            </button>
+          </div>
+          <div id="classroomGrid" class="classroom-grid"></div>
+          <div class="notice warning"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 20h20L12 3z"/><path d="M12 10v5M12 18h.01"/></svg><span id="roomNotice">请确认选择的是本教室，选错会导致数据错误。</span></div>
+          <div class="actions step-actions">
+            <div class="confirmation-line single-action-line">
+              <button
+                id="confirmRoomButton"
+                class="button confirm-button"
+                type="button"
+              >
+                确认教室
+              </button>
+            </div>
+            <div id="stepOneMessage" class="message" role="status" aria-live="polite"></div>
+          </div>
+        </section>
+
+        <section class="panel step-panel hidden" data-step="2">
+          <div class="section-title stacked">
+            <h2>第二步：填写人数</h2>
+            <span id="selectedRoomLabel" class="room-tag">已选择：-</span>
+          </div>
+          <form id="countForm" class="count-form">
+            <div class="counter">
+              <div class="field">
+                <label for="expectedCount" class="required">应到</label>
+                <input
+                  id="expectedCount"
+                  name="expectedCount"
+                  type="text"
+                  inputmode="numeric"
+                  pattern="[0-9]*"
+                  maxlength="6"
+                  autocomplete="off"
+                  enterkeyhint="next"
+                  required
+                />
+              </div>
+              <div class="field">
+                <label for="actualCount" class="required">实到</label>
+                <input
+                  id="actualCount"
+                  name="actualCount"
+                  type="text"
+                  inputmode="numeric"
+                  pattern="[0-9]*"
+                  maxlength="6"
+                  autocomplete="off"
+                  enterkeyhint="done"
+                  required
+                />
+              </div>
+              <div class="field">
+                <label for="absentCount">缺考</label>
+                <output
+                  id="absentCount"
+                  name="absentCount"
+                  class="auto-count-value"
+                  for="expectedCount actualCount"
+                  aria-live="polite"
+                >-</output>
+              </div>
+            </div>
+            <div id="countPreview" class="calculated wide">
+              请填写应到、实到。
+            </div>
+            <div class="notice warning"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 20h20L12 3z"/><path d="M12 10v5M12 18h.01"/></svg><span>请二次确认人数无误后再提交。</span></div>
+            <div class="actions step-actions">
+              <div class="confirmation-line">
+                <button
+                  id="backToRoomButton"
+                  class="button secondary back-button"
+                  type="button"
+                >
+                  返回选教室
+                </button>
+                <button
+                  id="reviewButton"
+                  class="button confirm-button"
+                  type="submit"
+                >
+                  下一步：核对
+                </button>
+              </div>
+              <div id="stepTwoMessage" class="message" role="status" aria-live="polite"></div>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel step-panel confirm-panel hidden" data-step="3">
+          <div class="section-title stacked">
+            <h2 id="reviewTitle" tabindex="-1">第三步：核对提交</h2>
+            <span>核对无误后点「确认提交」；提交后不能自行修改。</span>
+          </div>
+          <div id="reviewBox" class="review-box"></div>
+          <div class="actions step-actions">
+            <div class="confirmation-line">
+              <button
+                id="editCountsButton"
+                class="button secondary back-button"
+                type="button"
+              >
+                返回修改
+              </button>
+              <button
+                id="confirmAddButton"
+                class="button confirm-button"
+                type="button"
+              >
+                确认提交
+              </button>
+            </div>
+            <div id="stepThreeMessage" class="message" role="status" aria-live="polite"></div>
+          </div>
+        </section>
+
+        <section class="panel step-panel done-panel hidden" data-step="4" aria-labelledby="doneTitle">
+          <div class="done-head">
+            <span class="done-mark" aria-hidden="true">✓</span>
+            <div>
+              <h2 id="doneTitle" tabindex="-1">已提交</h2>
+              <p>可以关闭页面了。填错请联系考务管理员。</p>
+            </div>
+          </div>
+          <div id="doneBox" class="review-box"></div>
+          <p id="doneJoke" class="done-joke"></p>
+        </section>
+      </section>
+
+      </div>
+    </main>
+    <footer class="pagefoot">
+      <span id="footOrg"></span>
+    </footer>
+
+    <div
+      id="appDialog"
+      class="app-dialog"
+      aria-hidden="true"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="appDialogTitle"
+    >
+      <div class="app-dialog-card">
+        <div class="app-dialog-head">
+          <strong id="appDialogTitle">确认</strong>
+        </div>
+        <div id="appDialogBody" class="app-dialog-body"></div>
+        <div class="app-dialog-actions">
+          <button id="appDialogCancel" class="button secondary" type="button">
+            取消
+          </button>
+          <button id="appDialogConfirm" class="button" type="button">
+            确认
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/index.js"></script>
+  </body>
+</html>

@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>管理员后台 - 缺考上报系统</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div id="loginView" class="login-wrap hidden">
+      <section class="panel login-panel">
+        <span class="seal" aria-hidden="true">考</span>
+        <div class="title-group">
+          <h1>管理员登录</h1>
+          <p>输入管理员密码，进入考务管理后台。</p>
+        </div>
+        <form id="firstPasswordForm" class="stack hidden" novalidate>
+          <div class="warn-box">首次使用：默认密码 112233 人人都知道，请先设置新的管理密码（4–64 个字符），之后才能使用后台。</div>
+          <div class="field"><label for="firstPwNew" class="required">新密码</label><input id="firstPwNew" type="password" autocomplete="new-password" minlength="4" maxlength="64" /></div>
+          <div class="field"><label for="firstPwConfirm" class="required">确认新密码</label><input id="firstPwConfirm" type="password" autocomplete="new-password" minlength="4" maxlength="64" /></div>
+          <div id="firstPwMessage" class="message" role="alert"></div>
+          <button class="button" type="submit">设置新密码并进入后台</button>
+        </form>
+        <form id="loginForm">
+          <div class="field">
+            <label for="password" class="required">管理员密码</label>
+            <input id="password" name="password" type="password" autocomplete="current-password" required aria-describedby="loginMessage" />
+            <div id="loginMessage" class="message" role="alert"></div>
+          </div>
+          <button id="loginButton" class="button" type="submit">登录</button>
+        </form>
+        <a href="/">← 返回填报页</a>
+      </section>
+    </div>
+
+    <div id="adminView" class="admin-shell hidden">
+      <aside class="rail">
+        <div class="timing-marks" aria-hidden="true"></div>
+        <div class="rail-brand">
+          <span class="seal" aria-hidden="true">考</span>
+          <div><strong>考务管理后台</strong><span class="sub" id="railOrg"></span></div>
+        </div>
+        <nav class="rail-nav" aria-label="后台导航">
+          <button class="nav-item" type="button" data-nav="data"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/><path d="M9 4v16"/></svg><span>数据</span></button>
+          <button class="nav-item" type="button" data-nav="dispatch"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7z"/></svg><span>下发</span></button>
+          <button class="nav-item" type="button" data-nav="clients"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg><span>客户端</span></button>
+          <button class="nav-item" type="button" data-nav="logs"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h7M9 17h7"/></svg><span>日志</span></button>
+          <button class="nav-item" type="button" data-nav="settings"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/></svg><span>设置</span></button>
+        </nav>
+        <div class="rail-foot">
+          <a class="button secondary" href="/"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11 12 3l9 8M5 10v10h14V10"/></svg><span>填报页</span></a>
+          <button id="logoutButton" class="button secondary" type="button"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5V3h4M16 17l5-5-5-5M21 12H9"/></svg><span>退出登录</span></button>
+        </div>
+      </aside>
+
+      <main class="admin-main">
+        <header class="admin-head">
+          <div>
+            <h1 id="viewTitle">实时看板</h1>
+            <p id="viewDesc"></p>
+          </div>
+          <span class="conn" id="connState" aria-live="polite"></span>
+        </header>
+        <div id="adminMessage" class="message" role="status"></div>
+
+        <!-- 下发 -->
+        <section id="view-dispatch" class="view" data-view="dispatch" hidden>
+          <section class="panel">
+              <div class="panel-head"><h2>当前下发 · 客户端状态</h2></div>
+              <div id="liveDispatch"></div>
+              <div id="liveClients" class="cs-list"></div>
+            </section>
+          <section class="panel">
+            <div class="panel-head"><h2>新建下发</h2>
+              <div><span class="label">服务器当前时间</span> <span class="servertime" id="serverClock">--:--:--</span></div>
+            </div>
+            <form id="dispatchForm" class="dispatch-form" novalidate>
+              <div class="field">
+                <label for="dispatchMessage" class="required">弹窗内容</label>
+                <textarea id="dispatchMessage" maxlength="200" aria-describedby="dispatchMessageErr dispatchMessageCount"></textarea>
+                <div class="counter-line"><span id="dispatchMessageErr" class="field-error" role="alert"></span><span id="dispatchMessageCount">0 / 200 字，约 1 / 9 行</span></div>
+              </div>
+              <div class="field">
+                <label for="dispatchTitle" class="required">标题</label>
+                <input id="dispatchTitle" maxlength="120" placeholder="统计表的表头，例如：2026 年秋季期末考试" aria-describedby="dispatchTitleErr" />
+                <span id="dispatchTitleErr" class="field-error" role="alert"></span>
+              </div>
+              <div class="field">
+                <label for="dispatchExamDate">考试日期</label>
+                <input id="dispatchExamDate" type="date" />
+              </div>
+              <fieldset class="field" style="border:0;padding:0;margin:0;min-width:0">
+                <legend class="label" style="padding:0;margin-bottom:6px">下发方式</legend>
+                <div class="mode-row">
+                  <label class="choice"><input type="radio" name="dispatchMode" value="now" checked /> 立即下发</label>
+                  <label class="choice"><input type="radio" name="dispatchMode" value="scheduled" /> 定时下发</label>
+                </div>
+              </fieldset>
+              <div class="field hidden" id="scheduleField">
+                <label for="dispatchAt" class="required">下发时间</label>
+                <input id="dispatchAt" type="datetime-local" step="60" aria-describedby="dispatchAtHint dispatchAtErr" />
+                <span id="dispatchAtHint" class="hint">以服务器时间为准，不是本机时间；须晚于上方“服务器当前时间”。</span>
+                <span id="dispatchAtErr" class="field-error" role="alert"></span>
+              </div>
+              <div class="form-row">
+                <button id="dispatchSubmit" class="button" type="submit">立即下发</button>
+                <span id="dispatchResult" class="message" role="status"></span>
+              </div>
+            </form>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h2>下发历史</h2><button id="refreshDispatches" class="button secondary" type="button">刷新</button></div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>编号</th><th>内容</th><th>方式</th><th>状态</th><th>在线</th><th>已弹</th><th>已确认</th><th>已打开</th><th>失败</th><th>时间</th><th>操作</th></tr></thead>
+                <tbody id="dispatchRows"></tbody>
+              </table>
+            </div>
+            <div id="dispatchEmpty" class="empty hidden">暂无下发记录</div>
+          </section>
+        </section>
+
+        <!-- 客户端 -->
+        <section id="view-clients" class="view" data-view="clients" hidden>
+          <section class="panel">
+            <div class="panel-head">
+              <div><h2>已登记客户端</h2><p>教室由客户端访问 IP 按教室识别规则推算。</p></div>
+              <div class="modal-actions">
+                <button id="refreshClients" class="button secondary" type="button">刷新</button>
+                <button id="downloadClient" class="button" type="button"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg><span>下载绑定客户端</span></button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>主机名</th><th>IP</th><th>教室</th><th>在线</th><th>最后心跳</th><th>版本</th><th>下发状态</th><th>操作</th></tr></thead>
+                <tbody id="clientRows"></tbody>
+              </table>
+            </div>
+            <div id="clientEmpty" class="empty hidden">暂无客户端登记。下载绑定客户端并在教室电脑上运行后会出现在这里。</div>
+          </section>
+        </section>
+
+        <!-- 数据 -->
+        <section id="view-data" class="view" data-view="data" hidden>
+          <section class="panel board-panel" id="boardPanel">
+            <div class="panel-head board-head">
+              <div><h2>当前场次</h2><p id="boardNote">未开启</p></div>
+              <div class="board-kpis">
+                <div class="kpi" id="kpiSessionBox"><span>场次</span><strong class="state-text" id="kpiSession">-</strong><em id="kpiSessionNote"></em></div>
+                <div class="kpi"><span>已填报教室</span><strong id="kpiRooms">-</strong><em id="kpiRoomsNote"></em></div>
+                <div class="kpi"><span>客户端在线</span><strong id="kpiClients">-</strong><em id="kpiClientsNote"></em></div>
+              </div>
+              <div class="board-actions">
+                <button id="acceptButton" class="button danger" type="button" disabled>验收并结束本场</button>
+                <button id="boardToggle" class="button secondary" type="button" aria-expanded="false" aria-controls="boardBody">展开教室</button>
+              </div>
+            </div>
+            <div id="boardBody" hidden>
+              <div class="legend" aria-hidden="true"><span><i class="f"></i>已填报</span><span><i class="u"></i>未填报</span><span><span class="tag-off">离线</span>对应客户端离线</span></div>
+              <div id="roomGrid" class="room-grid"></div>
+            </div>
+          </section>
+
+          <form id="filterForm" class="panel toolbar" role="search">
+          <div class="field grow">
+            <label for="filterTitle">标题（包含即匹配）</label>
+            <input id="filterTitle" name="title" maxlength="120" placeholder="例如：银行" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label for="filterFrom">开始日期</label>
+            <input id="filterFrom" name="from" type="date" />
+          </div>
+          <div class="field">
+            <label for="filterTo">结束日期</label>
+            <input id="filterTo" name="to" type="date" />
+          </div>
+          <button class="button" type="submit">查询</button>
+          <button id="resetButton" class="button secondary" type="button">重置</button>
+          <button id="exportButton" class="button accent" type="button">导出表格</button>
+        </form>
+
+        <section class="summary-grid" aria-label="汇总数据">
+          <div class="metric">
+            <span>上报记录</span>
+            <strong id="summaryCount">0</strong>
+          </div>
+          <div class="metric">
+            <span>应到总人数</span>
+            <strong id="summaryExpected">0</strong>
+          </div>
+          <div class="metric">
+            <span>实到总人数</span>
+            <strong id="summaryActual">0</strong>
+          </div>
+          <div class="metric">
+            <span>缺考总人数</span>
+            <strong id="summaryAbsent">0</strong>
+          </div>
+          <div class="metric">
+            <span>总体出考率</span>
+            <strong id="summaryRate">0%</strong>
+          </div>
+        </section>
+
+        <section class="panel charts-panel" id="chartsPanel" aria-label="数据可视化">
+          <div class="panel-head"><div><h2>可视化分析</h2><p id="chartsNote">按上面的筛选条件统计；不填条件就是全部数据。</p></div></div>
+          <div id="chartsEmpty" class="empty hidden">当前筛选条件下没有数据</div>
+          <div id="chartsGrid" class="charts-grid">
+            <figure class="chart wide"><figcaption>多场考试对比<span class="seg" role="group" aria-label="对比指标"><button type="button" data-metric="people" aria-pressed="true">人数</button><button type="button" data-metric="rate" aria-pressed="false">出考率</button><button type="button" data-metric="absent" aria-pressed="false">缺考</button></span></figcaption><div id="chartCompare" class="chart-body"></div></figure>
+            <figure class="chart wide"><figcaption>趋势<span class="seg" role="group" aria-label="趋势指标"><button type="button" data-metric="rate" aria-pressed="true">出考率</button><button type="button" data-metric="expected" aria-pressed="false">应到</button><button type="button" data-metric="actual" aria-pressed="false">实到</button><button type="button" data-metric="absent" aria-pressed="false">缺考</button></span></figcaption><div id="chartTrend" class="chart-body"></div></figure>
+            <figure class="chart"><figcaption>教室对比<span class="seg" role="group" aria-label="教室指标"><button type="button" data-metric="rate" aria-pressed="true">出考率</button><button type="button" data-metric="absent" aria-pressed="false">缺考</button><button type="button" data-metric="expected" aria-pressed="false">应到</button></span></figcaption><div id="chartRooms" class="chart-body"></div></figure>
+            <figure class="chart"><figcaption>缺考最多的教室（前 10）</figcaption><div id="chartTop" class="chart-body"></div></figure>
+            <figure class="chart"><figcaption>出考率分布（教室数）</figcaption><div id="chartDist" class="chart-body"></div></figure>
+            <figure class="chart"><figcaption>单间教室历次<select id="roomPick" aria-label="选择教室"><option value="">选择教室…</option></select></figcaption><div id="chartRoom" class="chart-body"></div></figure>
+          </div>
+        </section>
+
+        <section class="panel table-panel">
+          <div class="table-wrap">
+            <table class="report-table">
+              <thead>
+                <tr>
+                  <th>标题</th>
+                  <th>日期</th>
+                  <th>场次</th>
+                  <th>教室</th>
+                  <th>应到</th>
+                  <th>实到</th>
+                  <th>缺考</th>
+                  <th>出考率</th>
+                  <th>总数</th>
+                  <th>总出考率</th>
+                  <th>提交时间</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="reportRows"></tbody>
+            </table>
+          </div>
+          <div id="emptyState" class="empty hidden">暂无上报记录</div>
+          <div class="pager">
+            <span id="pagerInfo">第 1 页，共 0 条</span>
+            <div class="pager-actions">
+              <button id="prevButton" class="button secondary" type="button">
+                上一页
+              </button>
+              <button id="nextButton" class="button secondary" type="button">
+                下一页
+              </button>
+            </div>
+          </div>
+        </section>
+
+
+          <section class="panel import-panel" aria-label="Excel 导入预览">
+          <div class="import-head">
+            <div>
+              <h2>Excel 导入预览</h2>
+              <p>
+                读取服务器桌面的出考率 Excel，只做解析预览，不会写入数据库。
+              </p>
+            </div>
+            <div class="import-actions">
+              <button id="previewExcelButton" class="button accent" type="button">
+                预览桌面 Excel
+              </button>
+              <button id="importExcelButton" class="button danger" type="button" disabled>
+                导入清洗后数据
+              </button>
+            </div>
+          </div>
+          <div id="excelPreviewSummary" class="excel-preview-summary hidden"></div>
+          <div id="excelPreviewContent" class="excel-preview-content"></div>
+          <div id="excelPreviewEmpty" class="empty">
+            还没有预览结果
+          </div>
+        </section>
+        </section>
+
+        <!-- 日志 -->
+        <section id="view-logs" class="view" data-view="logs" hidden>
+          <section class="panel log-panel" aria-label="系统日志">
+          <div class="log-head">
+            <div>
+              <h2>系统操作日志</h2>
+              <p>记录提交、验收、修改项目、删除、重复填报拦截等关键动作。</p>
+            </div>
+            <button id="refreshLogsButton" class="button secondary" type="button">
+              刷新日志
+            </button>
+          </div>
+          <form id="logFilterForm" class="log-filter">
+            <div class="field">
+              <label for="logDate">日志日期</label>
+              <input id="logDate" name="date" type="date" />
+            </div>
+            <div class="field">
+              <label for="logKeyword">日志检索</label>
+              <input
+                id="logKeyword"
+                name="keyword"
+                placeholder="日期、IP、教室、动作、内容"
+              />
+            </div>
+            <button class="button" type="submit">检索日志</button>
+            <button id="resetLogsButton" class="button secondary" type="button">
+              重置
+            </button>
+          </form>
+          <div id="logSummary" class="log-summary"></div>
+          <div id="logRows" class="log-list"></div>
+          <div id="logEmptyState" class="empty hidden">暂无系统日志</div>
+        </section>
+        </section>
+
+        <!-- 设置 -->
+        <section id="view-settings" class="view" data-view="settings" hidden>
+          <section class="panel" id="sitePanel">
+            <div class="panel-head"><div><h2>基本信息</h2><p>单位名称和地址印在统计表上；教室数量和名称决定填报页有哪些教室。这里改一次即可，不用每次下发都填。</p></div></div>
+            <form id="siteForm" class="stack" novalidate>
+              <div class="form-row">
+                <div class="field grow"><label for="siteOrgName" class="required">单位名称</label><input id="siteOrgName" maxlength="60" autocomplete="organization" placeholder="例如：某某市教育考试中心" aria-describedby="siteOrgNameErr" /><span id="siteOrgNameErr" class="field-error" role="alert"></span></div>
+                <div class="field grow"><label for="siteOrgAddress">地址（统计表页脚，可留空）</label><input id="siteOrgAddress" maxlength="120" autocomplete="off" /></div>
+              </div>
+              <div class="field"><label for="siteRoomCount" class="required">教室数量（1–500）</label><input id="siteRoomCount" type="number" min="1" max="500" inputmode="numeric" aria-describedby="siteRoomsHint" />
+                <span id="siteRoomsHint" class="hint"></span></div>
+              <fieldset class="field" style="border:0;padding:0;margin:0;min-width:0">
+                <legend class="label" style="padding:0;margin-bottom:6px">教室名称</legend>
+                <div class="mode-row">
+                  <label class="choice"><input type="radio" name="siteNaming" value="auto" checked /> 自动生成（一教室、二教室……）</label>
+                  <label class="choice"><input type="radio" name="siteNaming" value="custom" /> 自己指定每间教室的名称</label>
+                </div>
+                <textarea id="siteRoomNames" class="hidden" rows="8" placeholder="一行一间，按顺序：第 1 行是 IP 第几段=1 的教室，以此类推" aria-describedby="siteRoomNamesErr"></textarea>
+                <span id="siteRoomNamesErr" class="field-error" role="alert"></span>
+              </fieldset>
+              <div class="field"><label for="siteRoomNotice">填报提醒（老师选教室时看到，可留空）</label><input id="siteRoomNotice" maxlength="80" autocomplete="off" /></div>
+              <div id="siteLocked" class="warn-box hidden">当前有未验收的数据，教室数量和名称暂时不能修改（已提交的数据是按教室号存的）。请先验收；单位名称、地址和填报提醒不受影响。</div>
+              <div class="form-row"><button id="saveSite" class="button" type="submit">保存基本信息</button><span id="siteMessage" class="message" role="status"></span></div>
+            </form>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><div><h2>访问地址</h2><p>教室电脑与管理员用这些地址访问本服务端（<span id="serverNameText"></span>）。</p></div>
+              <button id="refreshSettings" class="button secondary" type="button">刷新</button></div>
+            <div id="accessUrls" class="url-list"></div>
+            <div id="accessEmpty" class="empty hidden">未能获取本机局域网地址</div>
+          </section>
+          <div class="settings-grid">
+            <section class="panel">
+              <div class="panel-head"><div><h2>教室识别规则</h2><p>按访问 IP 的第几段确定教室号（1 到教室数量），前缀用于限定网段。</p></div></div>
+              <form id="ruleForm" class="stack" novalidate>
+                <div class="form-row">
+                  <div class="field"><label for="ruleOctet">第几段</label>
+                    <select id="ruleOctet"><option value="1">第 1 段</option><option value="2">第 2 段</option><option value="3">第 3 段</option><option value="4">第 4 段</option></select></div>
+                  <div class="field"><label for="rulePrefix">IP 前缀</label><input id="rulePrefix" placeholder="如 10.10." autocomplete="off" aria-describedby="rulePrefixErr" />
+                    <span id="rulePrefixErr" class="field-error" role="alert"></span></div>
+                </div>
+                <div class="field"><label for="ruleIp">试算 IP</label><input id="ruleIp" placeholder="如 10.10.7.23" autocomplete="off" inputmode="decimal" /></div>
+                <div id="ruleResult" class="rule-result" aria-live="polite">输入 IP 查看对应教室</div>
+                <div class="suggest-box"><span id="suggestText">根据已登记客户端的 IP 自动推荐规则。</span>
+                  <button id="suggestRule" class="button secondary" type="button">按已登记客户端自动推荐</button></div>
+                <div class="form-row"><button id="saveRule" class="button" type="submit">保存规则</button><span id="ruleMessage" class="message" role="status"></span></div>
+              </form>
+            </section>
+            <section class="panel">
+              <div class="panel-head"><div><h2>修改管理密码</h2><p>新密码 4–64 个字符。</p></div></div>
+              <form id="passwordForm" class="stack" novalidate>
+                <div class="field"><label for="pwOld" class="required">旧密码</label><input id="pwOld" type="password" autocomplete="current-password" aria-describedby="pwOldErr" /><span id="pwOldErr" class="field-error" role="alert"></span></div>
+                <div class="field"><label for="pwNew" class="required">新密码</label><input id="pwNew" type="password" autocomplete="new-password" aria-describedby="pwNewErr" /><span id="pwNewErr" class="field-error" role="alert"></span></div>
+                <div class="field"><label for="pwConfirm" class="required">确认新密码</label><input id="pwConfirm" type="password" autocomplete="new-password" aria-describedby="pwConfirmErr" /><span id="pwConfirmErr" class="field-error" role="alert"></span></div>
+                <div class="form-row"><button id="savePassword" class="button danger" type="submit">修改密码</button><span id="pwMessage" class="message" role="status"></span></div>
+              </form>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="detailModal" class="modal" role="dialog" aria-modal="true">
+      <div class="modal-content">
+        <div class="modal-head">
+          <h2>上报详情</h2>
+              <div class="modal-actions">
+                <button id="editDetailButton" class="button" type="button">
+                  修改
+                </button>
+                <button id="exportDetailImageButton" class="button accent" type="button">
+                  导出图片
+                </button>
+            <button id="closeModalButton" class="button secondary" type="button">
+              关闭
+            </button>
+          </div>
+        </div>
+        <div id="detailContent" class="detail-grid"></div>
+      </div>
+    </div>
+
+    <div id="editModal" class="modal edit-modal" role="dialog" aria-modal="true">
+      <div class="modal-content edit-modal-content">
+        <div class="modal-head">
+          <h2>修改入库数据</h2>
+          <div class="modal-actions">
+            <button id="cancelEditButton" class="button secondary" type="button">
+              关闭
+            </button>
+          </div>
+        </div>
+        <form id="editReportForm" class="edit-report-form">
+          <div class="edit-meta-grid">
+            <div class="field">
+              <label for="editReportTitle" class="required">考试项目名称</label>
+              <input id="editReportTitle" name="title" required />
+            </div>
+            <div class="field">
+              <label for="editExamDate" class="required">考试日期</label>
+              <input id="editExamDate" name="examDate" type="date" required />
+            </div>
+            <div class="field">
+              <label for="editSessionName">场次</label>
+              <input
+                id="editSessionName"
+                name="sessionName"
+                placeholder="留空则自动显示第几场"
+              />
+            </div>
+          </div>
+          <div class="edit-table-wrap">
+            <table class="edit-table">
+              <thead>
+                <tr>
+                  <th>教室</th>
+                  <th>应到</th>
+                  <th>实到</th>
+                  <th>缺考</th>
+                  <th>出考率</th>
+                </tr>
+              </thead>
+              <tbody id="editRows"></tbody>
+            </table>
+          </div>
+          <div class="edit-summary" id="editSummary"></div>
+          <div class="edit-actions">
+            <button id="saveEditButton" class="button danger" type="submit">
+              保存修改
+            </button>
+          </div>
+          <div id="editMessage" class="message"></div>
+        </form>
+      </div>
+    </div>
+
+    <div
+      id="adminDialog"
+      class="app-dialog"
+      aria-hidden="true"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="adminDialogTitle"
+    >
+      <div class="app-dialog-card">
+        <div class="app-dialog-head">
+          <strong id="adminDialogTitle">确认</strong>
+        </div>
+        <div id="adminDialogBody" class="app-dialog-body"></div>
+        <label id="adminDialogInputWrap" class="app-dialog-input-wrap hidden">
+          <span id="adminDialogInputLabel">请输入</span>
+          <input
+            id="adminDialogInput"
+            type="password"
+            autocomplete="current-password"
+          />
+        </label>
+        <div class="app-dialog-actions">
+          <button id="adminDialogCancel" class="button secondary" type="button">
+            取消
+          </button>
+          <button id="adminDialogConfirm" class="button" type="button">
+            确认
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/report-image.js"></script>
+    <script src="/static/charts.js"></script>
+    <script src="/static/admin.js"></script>
+  </body>
+</html>
