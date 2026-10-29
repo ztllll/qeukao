@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import base64
-import csv
 import hashlib
 import hmac
 import io
@@ -10,6 +9,7 @@ import re
 import secrets
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 import zipfile
@@ -23,7 +23,8 @@ from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
+from xml.sax.saxutils import escape as xml_escape
 import xml.etree.ElementTree as ET
 
 
@@ -41,13 +42,9 @@ PENDING_ACCEPTANCE_MESSAGE = "数据未验收，不支持重新填报！请联�
 LOG_RETENTION_DAYS = 30
 SESSION_NAME_MAX_LEN = 40
 EXCEL_DATE_PLACEHOLDER = "1900-01-01"
-EXCEL_IMPORT_FILE = os.getenv("QEUKAO_EXCEL_IMPORT_FILE", "")
-_profile = Path(os.getenv("USERPROFILE", str(Path.home())))
-_excel_dirs = ([Path(os.environ["QEUKAO_EXCEL_IMPORT_DIR"]).expanduser()]
-               if os.getenv("QEUKAO_EXCEL_IMPORT_DIR") else [])
-_excel_dirs += [_profile / "Desktop", _profile / "OneDrive" / "Desktop",
-                Path.home() / "桌面", Path.home() / "Desktop"]
-EXCEL_IMPORT_DIR = next((path for path in _excel_dirs if path.is_dir()), _excel_dirs[-1])
+EXCEL_UPLOAD_MAX = 20 * 1024 * 1024
+EXCEL_UNZIPPED_MAX = 200 * 1024 * 1024  # 防压缩炸弹：解压后总大小上限
+EXCEL_BAD_FILE_MESSAGE = "请选择 .xlsx 格式的 Excel 文件"
 
 
 class AppError(Exception):
@@ -1956,69 +1953,60 @@ def delete_report_group(report_id, payload, client_ip=""):
     }
 
 
-def export_reports_csv(query):
-    groups = query_grouped_reports(query, include_items=True)
+XLSX_BAD_XML_CHARS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
 
-    output = io.StringIO()
-    output.write("\ufeff")
-    writer = csv.writer(output)
-    writer.writerow(
-        [
-            "记录ID",
-            "标题",
-            "日期",
-            "场次",
-            "考试时间",
-            "教室",
-            "教室编号",
-            "科目",
-            "班级",
-            "上报人",
-            "联系方式",
-            "应到",
-            "实到",
-            "缺考",
-            "出考率",
-            "总数",
-            "总出考率",
-            "验收批次",
-            "缺考学生",
-            "备注",
-            "提交时间",
-            "更新时间",
-            "提交 IP",
+
+def export_reports_xlsx(query):
+    # 一个工作表「出考率数据」：标题、考试日期、教室、应到、实到、缺考、出考率；可原样导回本系统
+    rows = [
+        (report["title"], report["examDate"], report["roomNumber"], report["roomName"], report["expectedCount"], report["actualCount"], report["absentCount"], report["attendanceRate"])
+        for group in query_grouped_reports(query, include_items=True)
+        for report in group["items"]
+    ]
+    rows.sort(key=lambda r: (r[0], r[2] is None, r[2] or 0, r[3]))  # 标题 → 教室编号（无编号排后）→ 教室名
+    rows.sort(key=lambda r: r[1], reverse=True)  # 再按考试日期降序（稳定排序，同日期内保持上面的顺序）
+
+    def text_cell(ref, value, style=""):
+        text = xml_escape(XLSX_BAD_XML_CHARS.sub("", str(value)))
+        return f'<c r="{ref}" t="inlineStr"{style}><is><t xml:space="preserve">{text}</t></is></c>'
+
+    heads = ("标题", "考试日期", "教室", "应到", "实到", "缺考", "出考率")
+    sheet_rows = ['<row r="1">' + "".join(text_cell(f"{chr(65 + i)}1", h, ' s="1"') for i, h in enumerate(heads)) + "</row>"]
+    for n, (title, exam_date, _number, room, expected, actual, absent, rate) in enumerate(rows, start=2):
+        cells = [
+            text_cell(f"A{n}", title),
+            text_cell(f"B{n}", exam_date),
+            text_cell(f"C{n}", room),
+            f'<c r="D{n}"><v>{int(expected)}</v></c>',
+            f'<c r="E{n}"><v>{int(actual)}</v></c>',
+            f'<c r="F{n}"><v>{int(absent)}</v></c>',
+            f'<c r="G{n}" s="2"><v>{rate}</v></c>',
         ]
+        sheet_rows.append(f'<row r="{n}">' + "".join(cells) + "</row>")
+    widths = (34, 14, 16, 10, 10, 10, 12)
+    sheet = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        f'<dimension ref="A1:G{len(rows) + 1}"/>'
+        '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>'
+        "<cols>" + "".join(f'<col min="{i}" max="{i}" width="{w}" customWidth="1"/>' for i, w in enumerate(widths, start=1)) + "</cols>"
+        "<sheetData>" + "".join(sheet_rows) + "</sheetData>"
+        f'<autoFilter ref="A1:G{len(rows) + 1}"/>'
+        "</worksheet>"
     )
-    for group in groups:
-        for report in group["items"]:
-            writer.writerow(
-                [
-                    report["id"],
-                    report["title"],
-                    report["examDate"],
-                    group["sessionName"],
-                    report["examTime"],
-                    report["roomName"],
-                    report["roomNumber"] or "",
-                    report["subjectName"],
-                    report["className"],
-                    report["reporterName"],
-                    report["reporterContact"],
-                    report["expectedCount"],
-                    report["actualCount"],
-                    report["absentCount"],
-                    f'{report["attendanceRate"] * 100:.2f}%',
-                    report["totalCount"],
-                    f'{report["totalAttendanceRate"] * 100:.2f}%',
-                    report["batchToken"],
-                    report["absentStudentsText"],
-                    report["remark"],
-                    report["createdAt"],
-                    report["updatedAt"],
-                    report["clientIp"],
-                ]
-            )
-    return output.getvalue().encode("utf-8")
+    parts = {
+        "[Content_Types].xml": '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>',
+        "_rels/.rels": '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+        "xl/workbook.xml": '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="出考率数据" sheetId="1" r:id="rId1"/></sheets><definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">出考率数据!$A$1:$G$' + str(len(rows) + 1) + "</definedName></definedNames></workbook>",
+        "xl/_rels/workbook.xml.rels": '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>',
+        "xl/styles.xml": '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Arial"/></font><font><b/><sz val="11"/><name val="Arial"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="10" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>',
+        "xl/worksheets/sheet1.xml": sheet,
+    }
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, content in parts.items():
+            zf.writestr(name, content)
+    return output.getvalue()
 
 
 def text_value(value):
@@ -2381,19 +2369,183 @@ def compare_excel_source_totals(table):
     return messages
 
 
-def parse_excel_preview_tables(file_path):
-    if not file_path.exists():
-        raise AppError(
-            HTTPStatus.NOT_FOUND,
-            "NOT_FOUND",
-            f"未找到 Excel 文件：{file_path}",
+def add_excel_row(table, row_no, room_raw, serial_raw, expected, actual, source_absent, problems, discarded_items, warnings):
+    # 「教室|应到|实到」按表格式和「一行一条」平铺格式共用同一套校验口径与 discard/problem/warning 结构
+    sheet_name, table_index = table["sheetName"], table["tableIndex"]
+    (
+        room_name,
+        room_number,
+        room_corrected,
+        original_room,
+        serial_number,
+    ) = cleaned_excel_room(room_raw, serial_raw)
+    discard_reason = ""
+    issue = ""
+    if expected is None or actual is None:
+        discard_reason = "缺少应到或实到人数，放弃导入"
+    elif expected < 0 or actual < 0:
+        discard_reason = "人数为负数，放弃导入"
+    elif actual > expected:
+        discard_reason = "实到人数大于应到人数，放弃导入"
+    elif not room_name:
+        issue = "缺少教室"
+    elif room_number is None:
+        issue = "教室无法识别"
+    elif room_number < 1 or room_number > len(qk_config.room_names()):
+        issue = "教室超出当前系统配置的教室范围"
+    if discard_reason:
+        discarded = build_excel_discard(
+            sheet_name,
+            table_index,
+            row_no,
+            discard_reason,
+            room_raw,
+            expected,
+            actual,
         )
-    if file_path.suffix.lower() != ".xlsx":
-        raise AppError(
-            HTTPStatus.BAD_REQUEST,
-            "VALIDATION_ERROR",
-            "当前预览只支持 .xlsx 文件",
+        table["discardedItems"].append(discarded)
+        discarded_items.append(discarded)
+    elif issue:
+        problem = build_excel_problem(
+            sheet_name,
+            table_index,
+            row_no,
+            issue,
+            room_raw,
+            expected,
+            actual,
         )
+        table["problems"].append(problem)
+        problems.append(problem)
+    else:
+        absent = expected - actual
+        item = {
+            "rowNumber": row_no,
+            "roomName": room_name,
+            "roomNumber": room_number,
+            "expectedCount": expected,
+            "actualCount": actual,
+            "absentCount": absent,
+            "attendanceRate": round(
+                0 if expected == 0 else actual / expected,
+                4,
+            ),
+            "originalRoom": original_room,
+            "serialNumber": serial_number,
+            "roomCorrectedFromSerial": room_corrected,
+        }
+        table["items"].append(item)
+        if source_absent is not None and source_absent != absent:
+            warning = build_excel_warning(
+                sheet_name,
+                table_index,
+                (
+                    f"第 {row_no} 行源表缺考为 {source_absent}，"
+                    f"按应到-实到应为 {absent}；导入将采用系统计算值。"
+                ),
+                row_no,
+            )
+            table["warnings"].append(warning)
+            warnings.append(warning)
+        if room_corrected:
+            warning = build_excel_warning(
+                sheet_name,
+                table_index,
+                (
+                    f"第 {row_no} 行教室列为“{original_room}”，"
+                    f"已按序号 {serial_number} 清洗为“{room_name}”。"
+                ),
+                row_no,
+            )
+            table["warnings"].append(warning)
+            warnings.append(warning)
+
+
+def excel_flat_columns(row):
+    # 「一行一条」平铺格式的表头：同一行含 标题/考试日期/教室/应到/实到（缺考可有可无，列顺序任意）
+    headers = [text_value(value) for value in row]
+    names = {"title": "标题", "date": "考试日期", "room": "教室", "expected": "应到", "actual": "实到"}
+    if any(name not in headers for name in names.values()):
+        return None
+    columns = {key: headers.index(name) for key, name in names.items()}
+    columns["absent"] = headers.index("缺考") if "缺考" in headers else None
+    return columns
+
+
+def excel_flat_date(value):
+    # 文本 YYYY-MM-DD 或 Excel 日期序列号；认不出返回 ""
+    try:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return (datetime(1899, 12, 30) + timedelta(days=int(value))).date().isoformat() if value >= 1 else ""
+        match = re.fullmatch(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", text_value(value))
+        return datetime(*map(int, match.groups())).date().isoformat() if match else ""
+    except (ValueError, OverflowError):
+        return ""
+
+
+def excel_flat_count(value):
+    # 平铺格式的人数必须是整数（不像按表格式那样把 12.5 截成 12）
+    text = text_value(value)
+    return int(text) if re.fullmatch(r"-?\d+", text) else None
+
+
+def parse_excel_flat_rows(rows, header_index, columns, sheet_name, table_index, tables, problems, discarded_items, warnings):
+    # 表头行以下每行一条记录，按 (标题, 考试日期) 分组成与按表格式一致的 table
+    groups = {}
+    for row_index in range(header_index + 1, len(rows)):
+        row = rows[row_index]
+        if excel_column_maps(row) or excel_flat_columns(row):
+            break  # 下面又出现了新表头，交给外层循环处理
+        if not any(text_value(excel_cell(row, index)) for index in columns.values() if index is not None):
+            continue
+        title = text_value(excel_cell(row, columns["title"]))
+        exam_date = excel_flat_date(excel_cell(row, columns["date"]))
+        key = (title, exam_date)
+        if key not in groups:
+            table_index += 1
+            groups[key] = {
+                "sheetName": sheet_name,
+                "tableIndex": table_index,
+                "title": title,
+                "examDate": exam_date,
+                "needsDateReview": False,
+                "dateSource": "表内考试日期列",
+                "sessionName": infer_excel_session(sheet_name, title),
+                "items": [],
+                "problems": [],
+                "warnings": [],
+                "discardedItems": [],
+                "sourceTotals": {},
+            }
+        table = groups[key]
+        room_raw = excel_cell(row, columns["room"])
+        expected = excel_flat_count(excel_cell(row, columns["expected"]))
+        actual = excel_flat_count(excel_cell(row, columns["actual"]))
+        reason = (
+            "缺少标题，放弃导入" if not title
+            else "考试日期无法识别，放弃导入" if not exam_date
+            else "缺少教室，放弃导入" if not text_value(room_raw)
+            else ""
+        )
+        if reason:
+            discarded = build_excel_discard(sheet_name, table["tableIndex"], row_index + 1, reason, room_raw, expected, actual)
+            table["discardedItems"].append(discarded)
+            discarded_items.append(discarded)
+            continue
+        add_excel_row(
+            table, row_index + 1, room_raw, "", expected, actual,
+            parse_excel_number(excel_cell(row, columns["absent"])),
+            problems, discarded_items, warnings,
+        )
+    # 标题或日期缺失的行只作为全局「放弃导入」展示，不生成空标题/空日期的表
+    tables.extend(
+        table for table in groups.values()
+        if table["title"] and table["examDate"] and (table["items"] or table["problems"] or table["discardedItems"])
+    )
+    return table_index
+
+
+def parse_excel_preview_tables(file_path, file_name=None):
     tables = []
     problems = []
     discarded_items = []
@@ -2407,6 +2559,13 @@ def parse_excel_preview_tables(file_path):
             rows = read_xlsx_sheet_rows(zf, sheet["path"], shared_strings)
             table_index = 0
             for row_index, row in enumerate(rows):
+                flat_columns = excel_flat_columns(row)
+                if flat_columns:
+                    table_index = parse_excel_flat_rows(
+                        rows, row_index, flat_columns, sheet["name"], table_index,
+                        tables, problems, discarded_items, warnings,
+                    )
+                    continue
                 column_maps = excel_column_maps(row)
                 if not column_maps:
                     continue
@@ -2464,93 +2623,18 @@ def parse_excel_preview_tables(file_path):
                             excel_cell(data_row, columns.get("absent"))
                         )
                         row_no = data_row_index + 1
-                        (
-                            room_name,
-                            room_number,
-                            room_corrected,
-                            original_room,
-                            serial_number,
-                        ) = cleaned_excel_room(room_raw, serial_raw)
-                        discard_reason = ""
-                        issue = ""
-                        if expected is None or actual is None:
-                            discard_reason = "缺少应到或实到人数，放弃导入"
-                        elif expected < 0 or actual < 0:
-                            discard_reason = "人数为负数，放弃导入"
-                        elif actual > expected:
-                            discard_reason = "实到人数大于应到人数，放弃导入"
-                        elif not room_name:
-                            issue = "缺少教室"
-                        elif room_number is None:
-                            issue = "教室无法识别"
-                        elif room_number < 1 or room_number > len(qk_config.room_names()):
-                            issue = "教室超出当前系统配置的教室范围"
-                        if discard_reason:
-                            discarded = build_excel_discard(
-                                sheet["name"],
-                                table_index,
-                                row_no,
-                                discard_reason,
-                                room_raw,
-                                expected,
-                                actual,
-                            )
-                            table["discardedItems"].append(discarded)
-                            discarded_items.append(discarded)
-                        elif issue:
-                            problem = build_excel_problem(
-                                sheet["name"],
-                                table_index,
-                                row_no,
-                                issue,
-                                room_raw,
-                                expected,
-                                actual,
-                            )
-                            table["problems"].append(problem)
-                            problems.append(problem)
-                        else:
-                            absent = expected - actual
-                            item = {
-                                "rowNumber": row_no,
-                                "roomName": room_name,
-                                "roomNumber": room_number,
-                                "expectedCount": expected,
-                                "actualCount": actual,
-                                "absentCount": absent,
-                                "attendanceRate": round(
-                                    0 if expected == 0 else actual / expected,
-                                    4,
-                                ),
-                                "originalRoom": original_room,
-                                "serialNumber": serial_number,
-                                "roomCorrectedFromSerial": room_corrected,
-                            }
-                            table["items"].append(item)
-                            if source_absent is not None and source_absent != absent:
-                                warning = build_excel_warning(
-                                    sheet["name"],
-                                    table_index,
-                                    (
-                                        f"第 {row_no} 行源表缺考为 {source_absent}，"
-                                        f"按应到-实到应为 {absent}；导入将采用系统计算值。"
-                                    ),
-                                    row_no,
-                                )
-                                table["warnings"].append(warning)
-                                warnings.append(warning)
-                            if room_corrected:
-                                warning = build_excel_warning(
-                                    sheet["name"],
-                                    table_index,
-                                    (
-                                        f"第 {row_no} 行教室列为“{original_room}”，"
-                                        f"已按序号 {serial_number} 清洗为“{room_name}”。"
-                                    ),
-                                    row_no,
-                                )
-                                table["warnings"].append(warning)
-                                warnings.append(warning)
+                        add_excel_row(
+                            table,
+                            row_no,
+                            room_raw,
+                            serial_raw,
+                            expected,
+                            actual,
+                            source_absent,
+                            problems,
+                            discarded_items,
+                            warnings,
+                        )
                         seen_data = True
                         data_row_index += 1
                     if not table["examDate"]:
@@ -2585,8 +2669,7 @@ def parse_excel_preview_tables(file_path):
         table for table in valid_tables if table["warnings"] or table["discardedItems"]
     ]
     return {
-        "fileName": file_path.name,
-        "filePath": str(file_path),
+        "fileName": file_name or file_path.name,
         "sheetCount": len({table["sheetName"] for table in tables}),
         "tableCount": len(tables),
         "validTableCount": len(valid_tables),
@@ -2603,29 +2686,31 @@ def parse_excel_preview_tables(file_path):
     }
 
 
-def find_excel_import_file():
-    if EXCEL_IMPORT_FILE:
-        return Path(EXCEL_IMPORT_FILE).expanduser()
-    candidates = sorted(
-        EXCEL_IMPORT_DIR.glob("*出考率*.xlsx"),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
-    if candidates:
-        return candidates[0]
-    candidates = sorted(
-        EXCEL_IMPORT_DIR.glob("*.xlsx"),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
-    if candidates:
-        return candidates[0]
-    return EXCEL_IMPORT_DIR / "出考率1.xlsx"
+def parse_uploaded_excel(data, raw_name):
+    name = Path(unquote(raw_name or "").replace("\\", "/")).name[:120]
+    if not name.lower().endswith(".xlsx") or not zipfile.is_zipfile(io.BytesIO(data)):
+        raise AppError(HTTPStatus.BAD_REQUEST, "VALIDATION_ERROR", EXCEL_BAD_FILE_MESSAGE)
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            if sum(info.file_size for info in zf.infolist()) > EXCEL_UNZIPPED_MAX:
+                raise AppError(HTTPStatus.BAD_REQUEST, "VALIDATION_ERROR", "Excel 文件解压后过大，已拒绝")
+    except zipfile.BadZipFile as exc:
+        raise AppError(HTTPStatus.BAD_REQUEST, "VALIDATION_ERROR", EXCEL_BAD_FILE_MESSAGE) from exc
+    handle, tmp_name = tempfile.mkstemp(suffix=".xlsx")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(handle, "wb") as out:
+            out.write(data)
+        try:
+            return parse_excel_preview_tables(tmp_path, name)
+        except (zipfile.BadZipFile, KeyError, ET.ParseError) as exc:
+            raise AppError(HTTPStatus.BAD_REQUEST, "VALIDATION_ERROR", EXCEL_BAD_FILE_MESSAGE) from exc
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
-def preview_excel_import(client_ip=""):
-    file_path = find_excel_import_file()
-    result = parse_excel_preview_tables(file_path)
+def preview_excel_import(data, raw_name, client_ip=""):
+    result = parse_uploaded_excel(data, raw_name)
     log_operation(
         "excel_previewed",
         "Excel 导入预览",
@@ -2635,7 +2720,7 @@ def preview_excel_import(client_ip=""):
         ),
         actor_ip=client_ip,
         details={
-            "filePath": result["filePath"],
+            "fileName": result["fileName"],
             "tableCount": result["tableCount"],
             "validRowCount": result["validRowCount"],
             "problemCount": result["problemCount"],
@@ -2664,8 +2749,8 @@ def backup_database_for_excel_import():
     return str(qk_dbtools.backup_database(tag="before-excel-import"))
 
 
-def import_excel_preview(payload, client_ip=""):
-    result = preview_excel_import(client_ip)
+def import_excel_preview(data, raw_name, client_ip=""):
+    result = parse_uploaded_excel(data, raw_name)
     importable_tables = [
         table for table in result["tables"] if table["items"] and not table["problems"]
     ]
@@ -2756,7 +2841,7 @@ def import_excel_preview(payload, client_ip=""):
             ),
             actor_ip=client_ip,
             details={
-                "filePath": result["filePath"],
+                "fileName": result["fileName"],
                 "backupPath": backup_path,
                 "importedTables": imported_tables,
                 "importedRows": imported_rows,
@@ -2898,9 +2983,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             elif path == "/api/admin/reports/export" and method == "GET":
                 self.require_admin()
                 self.handle_export_reports(parse_qs(parsed.query))
-            elif path == "/api/admin/import/excel-preview" and method == "GET":
+            elif path == "/api/admin/import/excel-preview" and method == "POST":
                 self.require_admin()
-                self.write_json(success(preview_excel_import(self.request_client_ip())))
+                self.write_json(success(preview_excel_import(*self.read_upload(), self.request_client_ip())))
             elif path == "/api/admin/import/excel" and method == "POST":
                 self.require_admin()
                 self.handle_import_excel()
@@ -2966,6 +3051,22 @@ class RequestHandler(BaseHTTPRequestHandler):
             raise AppError(HTTPStatus.BAD_REQUEST, "VALIDATION_ERROR", "请求必须是 JSON 对象")
         return payload
 
+    def read_upload(self):
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError as exc:
+            raise AppError(HTTPStatus.BAD_REQUEST, "VALIDATION_ERROR", "请求长度不正确") from exc
+        if not 0 < length <= EXCEL_UPLOAD_MAX:
+            # 先把（不太大的）请求体读掉再回 400，否则浏览器会收到连接重置而不是这条提示
+            remaining = min(max(length, 0), 4 * EXCEL_UPLOAD_MAX)
+            while remaining > 0:
+                chunk = self.rfile.read(min(65536, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+            raise AppError(HTTPStatus.BAD_REQUEST, "VALIDATION_ERROR", "Excel 文件为空或超过 20 MB")
+        return self.rfile.read(length), self.headers.get("X-File-Name", "")
+
     def request_client_ip(self):
         fallback = self.client_address[0] if self.client_address else ""
         return resolve_client_ip(self.headers, fallback)
@@ -3003,18 +3104,19 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.write_json(success(delete_report_group(report_id, payload, self.request_client_ip())))
 
     def handle_export_reports(self, query):
-        body = export_reports_csv(query)
+        body = export_reports_xlsx(query)
         log_operation(
             "reports_exported",
             "后台表格已导出",
             "管理员导出了后台数据表格。",
             actor_ip=self.request_client_ip(),
         )
-        filename = f"qeukao-reports-{today_str()}.csv"
+        filename = f"出考率数据-{today_str()}.xlsx"
         self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         self.send_header(
-            "Content-Disposition", f'attachment; filename="{filename}"'
+            "Content-Disposition",
+            f"attachment; filename=\"qeukao-reports-{today_str()}.xlsx\"; filename*=UTF-8''{quote(filename)}",
         )
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
@@ -3022,8 +3124,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def handle_import_excel(self):
-        payload = self.read_json()
-        self.write_json(success(import_excel_preview(payload, self.request_client_ip())))
+        self.write_json(success(import_excel_preview(*self.read_upload(), self.request_client_ip())))
 
     def handle_admin_login(self):
         payload = self.read_json()

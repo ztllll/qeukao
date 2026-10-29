@@ -176,7 +176,7 @@
           </div>
           <button class="button" type="submit">查询</button>
           <button id="resetButton" class="button secondary" type="button">重置</button>
-          <button id="exportButton" class="button accent" type="button">导出表格</button>
+          <button id="exportButton" class="button accent" type="button" title="按当前筛选导出；不筛选就是全部历史数据">导出 Excel</button>
         </form>
 
         <section class="summary-grid" aria-label="汇总数据">
@@ -252,20 +252,24 @@
         </section>
 
 
-          <section class="panel import-panel" aria-label="Excel 导入预览">
+          <section class="panel import-panel" aria-label="Excel 导入（增加数据）">
           <div class="import-head">
             <div>
-              <h2>Excel 导入预览</h2>
+              <h2>Excel 导入（增加数据）</h2>
               <p>
-                读取服务器桌面的出考率 Excel，只做解析预览，不会写入数据库。
+                选择 Excel 文件，先预览，确认无误后导入。导入只会增加数据，不会删除或覆盖现有数据；同一个文件里的同一张表不会重复导入；导入前自动备份。支持本系统「导出 Excel」导出的文件。
               </p>
             </div>
             <div class="import-actions">
-              <button id="previewExcelButton" class="button accent" type="button">
-                预览桌面 Excel
+              <div class="field">
+                <label for="excelFileInput">Excel 文件（.xlsx）</label>
+                <input id="excelFileInput" type="file" accept=".xlsx" />
+              </div>
+              <button id="previewExcelButton" class="button accent" type="button" disabled>
+                预览
               </button>
               <button id="importExcelButton" class="button danger" type="button" disabled>
-                导入清洗后数据
+                导入
               </button>
             </div>
           </div>

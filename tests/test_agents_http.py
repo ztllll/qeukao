@@ -1,4 +1,5 @@
 """Public Windows HTTP contract checks (standard library, isolated data/ports)."""
+import io
 import json
 import os
 from pathlib import Path
@@ -16,10 +17,35 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CLOSED = "当前暂无可填报场次，请联系考务管理员"
+
+
+def xlsx_bytes(sheets):
+    """sheets: [(name, rows)]；单元格为 str（inlineStr）或数字。只用标准库造最小 xlsx。"""
+    def cell(r, c, v):
+        ref = "%s%d" % (chr(65 + c), r)
+        return '<c r="%s"><v>%s</v></c>' % (ref, v) if isinstance(v, (int, float)) else '<c r="%s" t="inlineStr"><is><t>%s</t></is></c>' % (ref, escape(v))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        z.writestr("xl/workbook.xml", '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>%s</sheets></workbook>' % "".join('<sheet name="%s" sheetId="%d" r:id="rId%d"/>' % (escape(n), i, i) for i, (n, _) in enumerate(sheets, 1)))
+        z.writestr("xl/_rels/workbook.xml.rels", '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">%s</Relationships>' % "".join('<Relationship Id="rId%d" Target="worksheets/sheet%d.xml"/>' % (i, i) for i in range(1, len(sheets) + 1)))
+        for i, (_, rows) in enumerate(sheets, 1):
+            body = "".join('<row r="%d">%s</row>' % (r, "".join(cell(r, c, v) for c, v in enumerate(row))) for r, row in enumerate(rows, 1))
+            z.writestr("xl/worksheets/sheet%d.xml" % i, '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>%s</sheetData></worksheet>' % body)
+    return out.getvalue()
+
+
+def xlsx_rows(data):
+    """读回导出的 sheet1：每行是单元格文本列表（只认 inlineStr 与数值）。"""
+    ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        root = ET.fromstring(z.read("xl/worksheets/sheet1.xml"))
+    return [["".join(t.text or "" for t in c.iter(ns + "t")) if c.get("t") == "inlineStr" else c.find(ns + "v").text for c in row] for row in root.iter(ns + "row")]
 
 
 class AgentsHTTPTest(unittest.TestCase):
@@ -42,7 +68,7 @@ class AgentsHTTPTest(unittest.TestCase):
         else:
             self.fail("no isolated test port available")
         self.url = "http://127.0.0.1:%s" % port
-        env = dict(os.environ, QEUKAO_DATA_DIR=str(self.data), QEUKAO_HOST="127.0.0.1", QEUKAO_PORT=str(port), QEUKAO_CLIENT_TEMPLATE=str(self.data / "client-template.exe"), QEUKAO_EXCEL_IMPORT_DIR=str(self.data))
+        env = dict(os.environ, QEUKAO_DATA_DIR=str(self.data), QEUKAO_HOST="127.0.0.1", QEUKAO_PORT=str(port), QEUKAO_CLIENT_TEMPLATE=str(self.data / "client-template.exe"))
         env.pop("QEUKAO_DB", None)
         env.pop("QEUKAO_ADMIN_PASSWORD", None)
         if admin_password:  # 默认用环境变量指定密码，不触发「首次必须改密码」；那条路径有专门的测试
@@ -73,9 +99,9 @@ class AgentsHTTPTest(unittest.TestCase):
 
     def call(self, method, path, body=None, headers=None):
         request_headers = {"Cookie": self.cookie, **(headers or {})}
-        raw = None if body is None else json.dumps(body).encode()
+        raw = body if isinstance(body, bytes) else None if body is None else json.dumps(body).encode()
         if raw is not None:
-            request_headers["Content-Type"] = "application/json"
+            request_headers["Content-Type"] = "application/octet-stream" if isinstance(body, bytes) else "application/json"
         request = urllib.request.Request(self.url + path, raw, request_headers, method=method)
         try:
             response = urllib.request.urlopen(request, timeout=5)
@@ -87,6 +113,9 @@ class AgentsHTTPTest(unittest.TestCase):
                 self.cookie = cookie.split(";", 1)[0]
             result = json.load(response) if "application/json" in response.headers.get("Content-Type", "") else response.read()
             return response.status, result
+
+    def upload(self, path, data, name="出考率.xlsx"):
+        return self.call("POST", path, data, {"X-File-Name": urllib.parse.quote(name)})
 
     def login(self, password="112233"):
         self.assertEqual(self.call("POST", "/api/admin/login", {"password": password})[0], 200)
@@ -390,12 +419,14 @@ class AgentsHTTPTest(unittest.TestCase):
         analytics = self.analytics(title="银行", **{"from": "2026-10-05", "to": "2026-10-31"})["totals"]
         self.assertEqual((summary["reportCount"], summary["totalExpectedCount"], summary["totalActualCount"]),
                          (analytics["exams"], analytics["expected"], analytics["actual"]))
-        status, csv_bytes = self.call("GET", "/api/admin/reports/export" + q)
+        status, exported = self.call("GET", "/api/admin/reports/export" + q)
         self.assertEqual(status, 200)
-        text = csv_bytes.decode("utf-8-sig") if isinstance(csv_bytes, bytes) else csv_bytes
-        self.assertIn("银行招聘笔试B", text)
-        self.assertNotIn("期末考试", text)
-        self.assertNotIn("2026-10-01", text)
+        rows = xlsx_rows(exported)
+        self.assertEqual(rows[0], ["标题", "考试日期", "教室", "应到", "实到", "缺考", "出考率"])
+        self.assertEqual([r[:5] for r in rows[1:]], [["银行招聘笔试A", "2026-10-22", "二教室", "30", "15"],
+                                                      ["银行招聘笔试B", "2026-10-08", "一教室", "30", "27"],
+                                                      ["银行招聘笔试B", "2026-10-08", "二教室", "30", "30"]], "日期降序 → 标题 → 教室编号，且只含筛选内的数据")
+        self.assertEqual(rows[1][5:], ["15", "0.5"])
         for bad in ("?from=2026-13-01", "?to=abc", "?from=2026-10-10&to=2026-10-01"):
             self.assertEqual(self.call("GET", "/api/admin/reports" + bad)[0], 400, bad)
         self.assertEqual(self.call("GET", "/api/admin/reports?title=%25")[1]["data"]["total"], 0, "% 是普通字符")
@@ -573,7 +604,7 @@ class AgentsHTTPTest(unittest.TestCase):
         self.start()
         routes = [("GET", "/api/admin/me"), ("GET", "/api/admin/reports"),
                   ("GET", "/api/admin/reports/summary"), ("GET", "/api/admin/reports/export"),
-                  ("GET", "/api/admin/import/excel-preview"), ("POST", "/api/admin/import/excel"),
+                  ("POST", "/api/admin/import/excel-preview"), ("POST", "/api/admin/import/excel"),
                   ("GET", "/api/admin/logs"), ("GET", "/api/admin/logs/summary"),
                   ("GET", "/api/admin/reports/1"), ("PUT", "/api/admin/reports/1"),
                   ("DELETE", "/api/admin/reports/1"), ("POST", "/api/admin/dispatch"),
@@ -635,27 +666,96 @@ for peer in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
         status, _ = self.call("PUT", path, {"password": "112233", "title": "历史修改", "examDate": "2026-10-25", "items": [{"id": item["id"], "expectedCount": 10, "actualCount": 9}]})
         self.assertEqual(status, 200)
         self.assertEqual(self.call("GET", "/api/admin/reports/summary")[1]["data"]["totalAbsentCount"], 1)
-        self.assertIn("历史修改", self.call("GET", "/api/admin/reports/export")[1].decode("utf-8"))
+        self.assertEqual([r[0] for r in xlsx_rows(self.call("GET", "/api/admin/reports/export")[1])[1:]], ["历史修改"])
         logs = self.call("GET", "/api/admin/logs?pageSize=100")[1]["data"]["items"]
         events = {item["eventType"] for item in logs}
         self.assertTrue({"session_opened", "session_closed", "dispatch_created", "dispatch_fired", "dispatch_cancelled"}.issubset(events))
 
-    def test_excel_preview_and_import_remain_available_when_closed(self):
-        with zipfile.ZipFile(self.data / "出考率.xlsx", "w") as archive:
-            archive.writestr("xl/workbook.xml", '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="2026-10-25" sheetId="1" r:id="rId1"/></sheets></workbook>')
-            archive.writestr("xl/_rels/workbook.xml.rels", '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>')
-            archive.writestr("xl/worksheets/sheet1.xml", '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>2026-10-25 导入考试</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>教室</t></is></c><c r="B2" t="inlineStr"><is><t>应到</t></is></c><c r="C2" t="inlineStr"><is><t>实到</t></is></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>七教室</t></is></c><c r="B3"><v>20</v></c><c r="C3"><v>18</v></c></row></sheetData></worksheet>')
+    TABLE_XLSX = [("2026-10-25", [["2026-10-25 导入考试"], ["教室", "应到", "实到"], ["七教室", 20, 18]])]
+
+    def test_excel_upload_preview_and_import_remain_available_when_closed(self):
         self.start()
         self.login()
-        status, preview = self.call("GET", "/api/admin/import/excel-preview")
+        data = xlsx_bytes(self.TABLE_XLSX)
+        self.assertEqual(self.call("GET", "/api/admin/import/excel-preview")[0], 404, "旧的服务器桌面预览路由已删除")
+        status, preview = self.upload("/api/admin/import/excel-preview", data)
         self.assertEqual(status, 200)
-        self.assertEqual(preview["data"]["validRowCount"], 1)
-        status, result = self.call("POST", "/api/admin/import/excel", {"password": "112233"})
+        self.assertEqual((preview["data"]["validRowCount"], preview["data"]["fileName"]), (1, "出考率.xlsx"))
+        self.assertNotIn("filePath", preview["data"], "不再返回服务器路径")
+        self.assertEqual(self.call("GET", "/api/admin/reports/summary")[1]["data"]["reportCount"], 0, "预览不写库")
+        status, result = self.upload("/api/admin/import/excel", data)
         self.assertEqual(status, 200)
         self.assertEqual(result["data"]["importedRows"], 1)
         self.assertTrue(Path(result["data"]["backupPath"]).is_relative_to(self.data))
         self.assertFalse(self.call("GET", "/api/session")[1]["data"]["open"])
         self.assertEqual(self.call("GET", "/api/admin/reports/summary")[1]["data"]["totalAbsentCount"], 2)
+        # 同一个文件再导入：整张表跳过，记录数不变
+        status, again = self.upload("/api/admin/import/excel", data)
+        self.assertEqual((status, again["data"]["importedRows"], len(again["data"]["skippedTables"])), (200, 0, 1))
+        self.assertEqual(self.call("GET", "/api/admin/reports/summary")[1]["data"]["totalAbsentCount"], 2)
+
+    def test_excel_upload_rejects_non_xlsx_and_oversize(self):
+        self.start()
+        self.login()
+        good = xlsx_bytes(self.TABLE_XLSX)
+        for path in ("/api/admin/import/excel-preview", "/api/admin/import/excel"):
+            for data, name in ((b"not a zip at all", "a.xlsx"), (good, "a.csv"), (b"", "a.xlsx"), (b"x" * (20 * 1024 * 1024 + 1), "a.xlsx")):
+                status, payload = self.upload(path, data, name)
+                self.assertEqual(status, 400, (path, name, len(data)))
+                self.assertFalse(payload["success"])
+        self.assertEqual(self.call("GET", "/api/admin/reports/summary")[1]["data"]["reportCount"], 0)
+
+    def test_excel_flat_rows_group_by_title_and_date_and_discard_bad_rows(self):
+        head = ["标题", "考试日期", "教室", "应到", "实到", "缺考", "出考率"]
+        serial = (datetime(2026, 10, 1) - datetime(1899, 12, 30)).days  # Excel 日期序列号
+        rows = [head,
+                ["期中", "2026-10-25", "一教室", 30, 28, 2, 0.9333],
+                ["期中", serial, "二教室", 30, 30, 0, 1],
+                ["期中", "2026-10-25", "二教室", 30, 25, 5, 0.83],
+                ["期中", "不是日期", "三教室", 30, 30, 0, 1],
+                ["期中", "2026-10-25", "三教室", 30, 31, 0, 1],
+                ["", "2026-10-25", "三教室", 30, 30, 0, 1],
+                ["期中", "2026-10-25", "三教室", 12.5, 10, 0, 1]]
+        self.start()
+        self.login()
+        result = self.upload("/api/admin/import/excel-preview", xlsx_bytes([("出考率数据", rows)]))[1]["data"]
+        tables = {(t["title"], t["examDate"]): [i["roomName"] for i in t["items"]] for t in result["tables"]}
+        self.assertEqual(tables, {("期中", "2026-10-25"): ["一教室", "二教室"], ("期中", "2026-10-01"): ["二教室"]})
+        self.assertEqual(sorted(d["reason"] for d in result["discardedItems"]),
+                         sorted(["考试日期无法识别，放弃导入", "实到人数大于应到人数，放弃导入", "缺少标题，放弃导入", "缺少应到或实到人数，放弃导入"]))
+
+    def test_exported_xlsx_imports_into_a_fresh_server_unchanged(self):
+        def exams():
+            data = self.call("GET", "/api/admin/reports?pageSize=100")[1]["data"]["items"]
+            return {(g["title"], g["examDate"], i["roomName"], i["expectedCount"], i["actualCount"])
+                    for g in data for i in self.call("GET", "/api/admin/reports/%s" % g["id"])[1]["data"]["items"]}
+        self.seed_exams()
+        before = exams()
+        status, exported = self.call("GET", "/api/admin/reports/export")
+        self.assertEqual((status, len(before)), (200, 8))
+        self.stop()
+        self.data = Path(subprocess.check_output(["mktemp", "-d"], text=True).strip())  # 另一个全新数据目录
+        self.addCleanup(shutil.rmtree, self.data)
+        (self.data / "config.json").write_text(json.dumps({"backup": {"enabled": False, "dir": str(self.data / "backups")}}), encoding="utf-8")
+        self.cookie = ""
+        self.start()
+        self.login()
+        self.assertEqual(exams(), set())
+        status, result = self.upload("/api/admin/import/excel", exported, "出考率数据-2026-10-29.xlsx")
+        self.assertEqual((status, result["data"]["importedRows"], result["data"]["discardedRows"]), (200, 8, 0), result)
+        self.assertEqual(exams(), before)
+
+    def test_export_headers_are_an_xlsx_download_with_chinese_filename(self):
+        self.start()
+        self.login()
+        urlopen = urllib.request.Request(self.url + "/api/admin/reports/export", headers={"Cookie": self.cookie})
+        with urllib.request.urlopen(urlopen) as response:
+            body = response.read()
+            disposition = response.headers["Content-Disposition"]
+            self.assertEqual(response.headers["Content-Type"], "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.assertIn("filename*=UTF-8''" + urllib.parse.quote("出考率数据-"), disposition)
+        self.assertIn('filename="qeukao-reports-', disposition)
+        self.assertEqual(xlsx_rows(body), [["标题", "考试日期", "教室", "应到", "实到", "缺考", "出考率"]])
 
     def test_submission_rechecks_session_after_waiting_for_writer(self):
         self.start()

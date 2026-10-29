@@ -18,7 +18,7 @@ import qk_config
 log = logging.getLogger("qk_dbtools")
 
 _BACKUP_GLOB = "qeukao-db-*.sqlite3"
-_CHECK_INTERVAL = 600
+_CHECK_INTERVAL = 60
 _post_import_hook = None
 _io_lock = threading.RLock()  # import_database 持锁时会再调 backup_database
 _sched_lock = threading.Lock()
@@ -296,35 +296,71 @@ def list_backups(dest_dir=None) -> list:
     return out
 
 
-def cleanup_old_backups(dest_dir=None, retention_days=None) -> int:
-    if retention_days is None:
-        retention_days = qk_config.load()["backup"]["retentionDays"]
-    cutoff = time.time() - float(retention_days) * 86400
+def cleanup_old_backups(dest_dir=None, retention_days=None, keep_count=None, protect_path=None) -> int:
+    """Age first, then count; import rollback snapshots are only subject to age.
+
+    protect_path reserves a count slot even after a clock rollback. The newest
+    backup is protected when this function is called without an operation path.
+    """
+    cfg = qk_config.load()["backup"]
+    days = cfg["retentionDays"] if retention_days is None else retention_days
+    count = cfg["keepCount"] if keep_count is None else keep_count
+    # Fail closed before unlinking anything, including for hand-edited config.
+    for value, maximum in ((days, 3650), (count, 1000)):
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
+            raise ValueError("备份保留天数或个数超出范围")
+    cutoff = time.time() - days * 86400
     removed = 0
-    for item in list_backups(dest_dir):
-        if item["mtime"] < cutoff:
+    with _io_lock:
+        items = list_backups(dest_dir)
+        protected = Path(protect_path).resolve() if protect_path else (Path(items[0]["path"]).resolve() if items else None)
+        ordinary = []
+        expired = []
+        for item in items:
+            path = Path(item["path"])
+            if _same_file(path, qk_config.DB_PATH):
+                continue  # Never rotate the live DB even if it has a backup-like name.
+            is_protected = path.resolve() == protected
+            if days and item["mtime"] < cutoff and not is_protected:
+                expired.append(path)
+            elif not re.match(r"^qeukao-db-[0-9]{8}-[0-9]{6}-before-(?:excel-import|import)", item["name"]):
+                ordinary.append(path)
+        # Reserve a place for this backup rather than retaining N plus one.
+        ordinary.sort(key=lambda p: p.resolve() != protected)
+        victims = expired + (ordinary[count:] if count else [])
+        # A killed process cannot run _copy_db's finally block. Never touch a
+        # fresh partial: another process may still be copying a large database.
+        for part in _backup_dir(dest_dir).glob(".qeukao-db-*.part"):
             try:
-                os.unlink(item["path"])
+                if part.is_file() and part.stat().st_mtime < time.time() - 86400:
+                    victims.append(part)
+            except OSError:
+                continue
+        for path in victims:
+            try:
+                path.unlink()
                 removed += 1
             except OSError:
-                log.warning("删除旧备份失败：%s", item["path"])
+                log.warning("删除旧备份失败：%s", path)
     return removed
 
 
-def backup_due(now: float, latest_mtime, every_days: int) -> bool:
+def backup_due(now: float, latest_mtime, every_hours: int) -> bool:
     """纯函数：是否到期。latest_mtime 为 None 表示从未备份。"""
-    return latest_mtime is None or now - latest_mtime >= every_days * 86400
+    return latest_mtime is None or now - latest_mtime >= every_hours * 3600
 
 
 def _scheduler_tick() -> bool:
     cfg = qk_config.load()["backup"]
     if not cfg["enabled"]:
         return False
-    items = list_backups()
-    if not backup_due(time.time(), items[0]["mtime"] if items else None, cfg["everyDays"]):
-        return False
-    backup_database(tag="auto")
-    cleanup_old_backups()
+    folder = _backup_dir()
+    with _io_lock:
+        items = list_backups(folder)
+        if not backup_due(time.time(), items[0]["mtime"] if items else None, cfg["everyHours"]):
+            return False
+        path = backup_database(dest_dir=folder, tag="auto")
+        cleanup_old_backups(dest_dir=folder, protect_path=path)
     return True
 
 

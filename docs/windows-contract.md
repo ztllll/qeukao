@@ -30,13 +30,15 @@
  "sessionSecret":"<首次启动随机生成>",
  "enrollKey":"<首次启动随机生成 24 位 urlsafe>",
  "roomRule":{"octet":3,"prefix":"10.10."},
- "backup":{"enabled":true,"dir":"","everyDays":3,"retentionDays":90}}
+ "backup":{"enabled":true,"dir":"","everyHours":72,"everyDays":3,"retentionDays":90,"keepCount":0}}
 ~~~
 - 密码和密钥放配置文件，**不放数据库**（避免导入旧库把密码回滚）。
 - `passwordHash` 缺失时：用环境变量 `QEUKAO_ADMIN_PASSWORD`，再缺省 `112233` 做比较。一旦通过 `set_admin_password` 设置，以哈希为准。
 - `sessionSecret`：环境变量 `QEUKAO_SESSION_SECRET` 优先，其次配置，缺失则生成并落盘。
 - 写文件必须原子（写临时文件再 `os.replace`）；读写加进程内锁。
-- `backup.dir` 为空表示 `<项目目录>/backups`。
+- `backup.dir` 为空表示源码目录（打包后 exe 所在目录）的 backups/；面板可选择目录，保存前创建并实际写入临时文件验证可写。切目录不搬移、不清理旧目录；备份列表随之切换。
+- `backup.everyHours`：1..8760，默认 72 小时；旧配置缺它时按 everyDays × 24 补全并落盘，不覆盖用户已有 everyHours。save 只传旧 everyDays（1..365）仍会更新小时；保存小时同时写 everyDays=ceil(everyHours/24) 兼容旧读者。
+- `backup.retentionDays`：0..3650，默认 90；`backup.keepCount`：0..1000，默认 0。0 分别表示不按天数/个数限制。
 
 ## 3. Python 模块 API
 ### qk_config.py（A1）
@@ -77,9 +79,16 @@ def set_post_import_hook(fn) -> None
 #   （GUI 直接调用这些函数，不经过 app 路由）；写日志失败只记 logging，不得让备份/导入失败；
 #   写入方式：独立短连接直接 INSERT（表结构见 app.init_db；表不存在则跳过），不得 import app（避免循环依赖）；
 #   自动备份(tag="auto")也记 db_backup，severity=info。
-def cleanup_old_backups(dest_dir=None, retention_days=None) -> int   # 只删 qeukao-db-*.sqlite3，返回删除数
+def cleanup_old_backups(dest_dir=None, retention_days=None, keep_count=None, protect_path=None) -> int
+    # 只删 qeukao-db-*.sqlite3；先按 mtime 天数，再按个数（mtime/name 新→旧）；返回删除数。
+    # before-import / before-excel-import 开头的 tag 为导入回退安全副本，只按天数，不占个数。
+    # protect_path 永不删且占普通备份的一个保留名额；未传则保护最新一份；不删除当前数据库本身。
+    # 调度和面板「立即备份」在成功备份后传入本次路径执行清理；导入本身不触发清理。
+    # 另清理超过 1 天的 .qeukao-db-*.part 半截文件（不动新文件/其它前缀）。
 def list_backups(dest_dir=None) -> list[dict]             # [{"path","name","size","mtime"}] 新→旧
-def start_backup_scheduler() -> threading.Thread          # daemon，每 10 分钟检查：enabled 且最新备份距今≥everyDays → 备份并清理
+def backup_due(now: float, latest_mtime, every_hours: int) -> bool  # ≥ 小时数即到期；无备份即到期
+def start_backup_scheduler() -> threading.Thread          # daemon，每 60 秒读取新配置：enabled 且最新备份距今≥everyHours → 备份并清理
+    # 最新备份包含手动与导入前备份；面板按同一份列表 mtime + 间隔显示下次时间；从未备份/已到期显示「1 分钟内」。
 ~~~
 
 ### app.py（A2）新增/改动的公开入口（GUI 依赖）
@@ -88,7 +97,7 @@ def init_all() -> None                                    # init_db + 迁移 + �
 def build_server(host: str, port: int) -> ThreadingHTTPServer   # 不 serve；调用方自己 serve_forever / shutdown
 def main() -> None                                        # init_all + build_server + serve_forever（命令行用）
 ~~~
-app.py 其余：`ADMIN_PASSWORD` 常量删除，8 处校验改走 `qk_config.check_admin_password`（含原先写死 `"112233"` 的 delete_report_group）；`SESSION_SECRET` 改 `qk_config.session_secret()`；`classroom_from_client_ip` 改走 `qk_config.room_from_ip`；`shutil.copy2` 备份改 `qk_dbtools.backup_database(tag="before-excel-import")`；Excel 导入目录改成候选探测（`QEUKAO_EXCEL_IMPORT_DIR` → `%USERPROFILE%\Desktop` → `%USERPROFILE%\OneDrive\Desktop` → `~/桌面` → `~/Desktop`，取第一个存在的）。
+app.py 其余：`ADMIN_PASSWORD` 常量删除，8 处校验改走 `qk_config.check_admin_password`（含原先写死 `"112233"` 的 delete_report_group）；`SESSION_SECRET` 改 `qk_config.session_secret()`；`classroom_from_client_ip` 改走 `qk_config.room_from_ip`；`shutil.copy2` 备份改 `qk_dbtools.backup_database(tag="before-excel-import")`；Excel 改为浏览器上传：`POST /api/admin/import/excel-preview` 与 `POST /api/admin/import/excel` 接收原始 .xlsx 字节及 URL 编码的 `X-File-Name` 头，不再探测桌面或读取旧的导入目录/文件环境变量；`GET /api/admin/reports/export` 导出 .xlsx。
 
 ### qk_agents.py（A2）供 GUI 使用
 ~~~python

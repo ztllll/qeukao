@@ -17,7 +17,7 @@ if errorlevel 1 (
 set ADD_CLIENT=
 if exist "client\dist\qeukao-client-template.exe" set ADD_CLIENT=--add-data "client\dist;client\dist"
 if not defined ADD_CLIENT echo 提示：没找到 client\dist\qeukao-client-template.exe，打出的服务端将不能生成客户端；请先在装有 Go 的机器上运行 scripts\build_client.sh 并拷到这里。
-python -m PyInstaller --noconsole --onefile --name QeukaoServer --add-data "static;static" --add-data "docs;docs" %ADD_CLIENT% --hidden-import app --hidden-import qk_config --hidden-import qk_dbtools --hidden-import qk_agents server_gui.py
+python -m PyInstaller --noconsole --onefile --name QeukaoServer --icon "assets\qeukao.ico" --add-data "assets;assets" --add-data "static;static" --add-data "docs;docs" %ADD_CLIENT% --hidden-import app --hidden-import qk_config --hidden-import qk_dbtools --hidden-import qk_agents server_gui.py
 if errorlevel 1 (
   echo 打包失败。
   pause

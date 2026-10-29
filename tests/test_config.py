@@ -90,6 +90,25 @@ class DefaultsAndPasswordTests(ConfigTestCase):
 
 
 class SaveTests(ConfigTestCase):
+    def test_backup_hours_migrate_and_preserve_existing_settings(self):
+        self.assertEqual(qk_config.load()["backup"]["everyHours"], 72)
+        self.assertEqual(qk_config.load()["backup"]["keepCount"], 0)
+        qk_config.CONFIG_PATH.write_text(json.dumps({"backup": {
+            "everyDays": 7, "dir": "custom", "enabled": False, "retentionDays": 42}}))
+        migrated = qk_config.load()["backup"]
+        self.assertEqual(migrated, {"everyDays": 7, "everyHours": 168, "keepCount": 0,
+                                    "dir": "custom", "enabled": False, "retentionDays": 42})
+        migrated["everyHours"] = 5
+        qk_config.CONFIG_PATH.write_text(json.dumps({"backup": migrated}))
+        self.assertEqual(qk_config.load()["backup"]["everyHours"], 5)
+        out = qk_config.save({"backup": {"everyHours": 25}})["backup"]
+        self.assertEqual((out["everyHours"], out["everyDays"], out["retentionDays"]), (25, 2, 42))
+        self.assertEqual(qk_config.save({"backup": {"everyDays": 4}})["backup"]["everyHours"], 96)
+        for hours, count, days in ((1, 0, 0), (8760, 1000, 3650)):
+            out = qk_config.save({"backup": {"everyHours": hours, "keepCount": count,
+                                            "retentionDays": days}})["backup"]
+            self.assertEqual((out["everyHours"], out["keepCount"], out["retentionDays"]), (hours, count, days))
+
     def test_unknown_keys_ignored_and_nested_deep_merged(self):
         qk_config.load()
         out = qk_config.save({"evil": 1, "port": 9000,
@@ -109,7 +128,9 @@ class SaveTests(ConfigTestCase):
             {"port": 0}, {"port": 65536}, {"port": "80"}, {"port": True},
             {"host": ""}, {"host": "  "},
             {"backup": {"everyDays": 0}}, {"backup": {"everyDays": 366}},
-            {"backup": {"retentionDays": 0}}, {"backup": {"retentionDays": 3651}},
+            {"backup": {"retentionDays": -1}}, {"backup": {"retentionDays": 3651}},
+            *({"backup": {"everyHours": v}} for v in (0, 8761, True, "1")),
+            *({"backup": {"keepCount": v}} for v in (-1, 1001, True, "1")),
             {"roomRule": {"octet": 5}}, {"roomRule": {"prefix": "abc"}},
             # a valid key in the same patch must not be applied either
             {"serverName": "changed", "port": 70000},

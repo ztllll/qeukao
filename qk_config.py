@@ -90,7 +90,8 @@ def _defaults() -> dict:
         # 管理员在后台「基本信息」里维护：单位名称/地址（统计表抬头与页脚）、教室数量与名称（空名单=按「N教室」自动生成）、
         # 填报页选教室时的提醒语。单位名称首次安装为空，后台会提示先填写
         "site": {"orgName": "", "orgAddress": "", "roomCount": 30, "roomNames": [], "roomNotice": DEFAULT_ROOM_NOTICE},
-        "backup": {"enabled": True, "dir": "", "everyDays": 3, "retentionDays": 90},
+        "backup": {"enabled": True, "dir": "", "everyDays": 3, "everyHours": 72,
+                   "retentionDays": 90, "keepCount": 0},
     }
 
 
@@ -172,7 +173,12 @@ def _current() -> dict:
             cfg["passwordLocked"] = True  # 坏配置不能把认证退回默认口令；在本机重设密码后解除
         _write(cfg)
         return _cache
-    if _merge_defaults(cfg, _defaults()):
+    migrated = False
+    backup = cfg.get("backup")
+    if isinstance(backup, dict) and "everyHours" not in backup and "everyDays" in backup:
+        backup["everyHours"] = _int_in(backup["everyDays"], 1, 365, "backup.everyDays") * 24
+        migrated = True
+    if _merge_defaults(cfg, _defaults()) or migrated:
         _write(cfg)
         return _cache
     _cache, _cache_sig = cfg, sig
@@ -258,11 +264,14 @@ def _validate_backup(b: dict) -> dict:
         raise ValueError("backup.enabled 必须是布尔值")
     if not isinstance(b.get("dir"), str):
         raise ValueError("backup.dir 必须是字符串")
+    hours = _int_in(b.get("everyHours"), 1, 8760, "backup.everyHours")
     return {
         "enabled": b["enabled"],
         "dir": b["dir"].strip(),
-        "everyDays": _int_in(b.get("everyDays"), 1, 365, "backup.everyDays"),
-        "retentionDays": _int_in(b.get("retentionDays"), 1, 3650, "backup.retentionDays"),
+        "everyHours": hours,
+        "everyDays": (hours + 23) // 24,
+        "retentionDays": _int_in(b.get("retentionDays"), 0, 3650, "backup.retentionDays"),
+        "keepCount": _int_in(b.get("keepCount"), 0, 1000, "backup.keepCount"),
     }
 
 
@@ -284,6 +293,8 @@ def save(patch: dict) -> dict:
                     continue
                 merged = dict(new[key])
                 merged.update({k: v for k, v in val.items() if k in new[key]})
+                if key == "backup" and "everyDays" in val and "everyHours" not in val:
+                    merged["everyHours"] = _int_in(val["everyDays"], 1, 365, "backup.everyDays") * 24
                 new[key] = validate_room_rule(merged) if key == "roomRule" else _validate_backup(merged)
             elif key == "port":
                 new[key] = _int_in(val, 1, 65535, "port")

@@ -7,6 +7,7 @@ const logoutButton = document.querySelector("#logoutButton");
 const filterForm = document.querySelector("#filterForm");
 const resetButton = document.querySelector("#resetButton");
 const exportButton = document.querySelector("#exportButton");
+const excelFileInput = document.querySelector("#excelFileInput");
 const previewExcelButton = document.querySelector("#previewExcelButton");
 const importExcelButton = document.querySelector("#importExcelButton");
 const excelPreviewSummary = document.querySelector("#excelPreviewSummary");
@@ -248,8 +249,8 @@ function showAdmin() {
 
 async function requestJson(url, options = {}) {
   const response = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
     ...options,
+    headers: { "Content-Type": "application/json", ...options.headers },
     keepSession: undefined,
   });
   const payload = await response.json();
@@ -665,14 +666,33 @@ function renderExcelPreview(result) {
   excelPreviewContent.appendChild(tableBox);
 }
 
+// 上传 .xlsx 原始字节；文件名放进 X-File-Name（URL 编码），由服务端解析后写库
+function postExcelFile(url, file) {
+  return requestJson(url, {
+    method: "POST",
+    body: file,
+    headers: { "Content-Type": "application/octet-stream", "X-File-Name": encodeURIComponent(file.name) },
+  });
+}
+
+function resetExcelPreview() {
+  state.excelPreview = null;
+  importExcelButton.disabled = true;
+  excelPreviewSummary.classList.add("hidden");
+  excelPreviewContent.innerHTML = "";
+  excelPreviewEmpty.classList.remove("hidden");
+}
+
 async function previewExcelImport() {
   setMessage(adminMessage, "");
+  const file = excelFileInput.files[0];
+  if (!file) return;
   state.excelPreview = null;
   importExcelButton.disabled = true;
   previewExcelButton.disabled = true;
   previewExcelButton.textContent = "解析中...";
   try {
-    const result = await requestJson("/api/admin/import/excel-preview");
+    const result = await postExcelFile("/api/admin/import/excel-preview", file);
     state.excelPreview = result;
     renderExcelPreview(result);
     importExcelButton.disabled = false;
@@ -685,15 +705,16 @@ async function previewExcelImport() {
   } catch (error) {
     setMessage(adminMessage, error.message, "error");
   } finally {
-    previewExcelButton.disabled = false;
-    previewExcelButton.textContent = "预览桌面 Excel";
+    previewExcelButton.disabled = !excelFileInput.files[0];
+    previewExcelButton.textContent = "预览";
   }
 }
 
 async function importCleanedExcel() {
   setMessage(adminMessage, "");
-  if (!state.excelPreview) {
-    setMessage(adminMessage, "请先预览 Excel，再执行导入。", "error");
+  const file = excelFileInput.files[0];
+  if (!state.excelPreview || !file) {
+    setMessage(adminMessage, "请先选择文件并预览，再执行导入。", "error");
     return;
   }
   const confirmed = await showAdminConfirm(
@@ -712,7 +733,7 @@ async function importCleanedExcel() {
   importExcelButton.disabled = true;
   importExcelButton.textContent = "导入中...";
   try {
-    const result = await requestJson("/api/admin/import/excel", { method: "POST", body: "{}" });
+    const result = await postExcelFile("/api/admin/import/excel", file);
     await loadData();
     await loadLogs();
     setMessage(
@@ -724,7 +745,7 @@ async function importCleanedExcel() {
     setMessage(adminMessage, error.message, "error");
     importExcelButton.disabled = false;
   } finally {
-    importExcelButton.textContent = "导入清洗后数据";
+    importExcelButton.textContent = "导入";
   }
 }
 
@@ -1214,6 +1235,10 @@ exportButton.addEventListener("click", () => {
   window.location.href = `/api/admin/reports/export${buildQuery(false)}`;
 });
 
+excelFileInput.addEventListener("change", () => {
+  resetExcelPreview();
+  previewExcelButton.disabled = !excelFileInput.files[0];
+});
 previewExcelButton.addEventListener("click", previewExcelImport);
 importExcelButton.addEventListener("click", importCleanedExcel);
 

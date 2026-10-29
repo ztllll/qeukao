@@ -155,6 +155,61 @@ class ImportTests(DbTestCase):
 
 
 class RetentionAndSchedulerTests(DbTestCase):
+    def test_count_rotation_preserves_safety_snapshots_and_current_backup(self):
+        self.bdir.mkdir()
+        auto = []
+        for n in range(5):
+            p = self.bdir / ("qeukao-db-20261029-00000%d-auto.sqlite3" % n)
+            p.write_bytes(b"x")
+            os.utime(p, (1000 + n, 1000 + n))
+            auto.append(p)
+        safety = [self.bdir / ("qeukao-db-20261029-000000-" + tag + ".sqlite3")
+                  for tag in ("before-import", "before-excel-import-2")]
+        other = self.bdir / "other.sqlite3"
+        for p in safety + [other]:
+            p.write_bytes(b"safe")
+        qk_config.save({"backup": {"keepCount": 3, "retentionDays": 0}})
+        self.assertEqual(qk_dbtools.cleanup_old_backups(), 2)
+        self.assertEqual([p.exists() for p in auto], [False, False, True, True, True])
+        self.assertTrue(all(p.exists() for p in safety + [other]))
+        # A clock rollback must not let either limit remove this operation's backup.
+        self.assertEqual(qk_dbtools.cleanup_old_backups(retention_days=1, keep_count=1,
+                                                       protect_path=auto[2]), 2)
+        self.assertTrue(auto[2].exists())
+        for p in safety:
+            os.utime(p, (1000, 1000))
+        qk_dbtools.cleanup_old_backups(retention_days=1, keep_count=0, protect_path=auto[2])
+        self.assertTrue(auto[2].exists() and other.exists())
+        self.assertFalse(any(p.exists() for p in safety))
+
+    def test_cleanup_never_deletes_live_db_or_accepts_invalid_limits(self):
+        self.bdir.mkdir()
+        live_name = self.bdir / "qeukao-db-live.sqlite3"
+        qk_config.DB_PATH = live_name
+        make_db(live_name, ["live"])
+        old = qk_dbtools.backup_database(tag="manual")
+        os.utime(live_name, (1, 1))
+        for kwargs in ({"keep_count": -1}, {"retention_days": -1}, {"keep_count": True}):
+            with self.assertRaises(ValueError):
+                qk_dbtools.cleanup_old_backups(**kwargs)
+            self.assertTrue(live_name.exists() and old.exists())
+        qk_dbtools.cleanup_old_backups(retention_days=1, keep_count=1, protect_path=old)
+        self.assertEqual(notes(live_name), ["live"])
+        self.assertTrue(old.exists())
+
+    def test_cleanup_removes_only_own_parts_older_than_one_day(self):
+        from unittest.mock import patch
+        self.bdir.mkdir()
+        names = (".qeukao-db-stale.sqlite3.part", ".qeukao-db-boundary.sqlite3.part",
+                 ".qeukao-db-fresh.sqlite3.part", ".other.sqlite3.part", "qeukao-db-visible.sqlite3")
+        paths = [self.bdir / name for name in names]
+        for path, stamp in zip(paths, (1, 13600, 13601, 1, 1)):
+            path.write_bytes(b"x")
+            os.utime(path, (stamp, stamp))
+        with patch("qk_dbtools.time.time", return_value=100000):
+            self.assertEqual(qk_dbtools.cleanup_old_backups(retention_days=0, keep_count=0), 1)
+        self.assertEqual([p.exists() for p in paths], [False, True, True, True, True])
+
     def test_cleanup_only_old_matching_files(self):
         self.bdir.mkdir()
         old = self.bdir / "qeukao-db-20200101-000000.sqlite3"
@@ -182,10 +237,9 @@ class RetentionAndSchedulerTests(DbTestCase):
         self.assertEqual(items[0]["size"], 2)
 
     def test_backup_due_boundaries(self):
-        day = 86400.0
-        self.assertTrue(qk_dbtools.backup_due(1000.0, None, 3))
-        self.assertFalse(qk_dbtools.backup_due(3 * day - 1, 0.0, 3))
-        self.assertTrue(qk_dbtools.backup_due(3 * day, 0.0, 3))
+        self.assertTrue(qk_dbtools.backup_due(1000.0, None, 1))
+        self.assertFalse(qk_dbtools.backup_due(3599, 0.0, 1))
+        self.assertTrue(qk_dbtools.backup_due(3600, 0.0, 1))
 
     def test_tick_respects_enabled_and_recency(self):
         qk_config.save({"backup": {"enabled": False}})
@@ -195,12 +249,25 @@ class RetentionAndSchedulerTests(DbTestCase):
         self.assertTrue(qk_dbtools._scheduler_tick())
         self.assertEqual(len(qk_dbtools.list_backups()), 1)
         self.assertFalse(qk_dbtools._scheduler_tick())  # fresh backup -> not due
+        qk_config.save({"backup": {"everyHours": 1, "keepCount": 1}})
+        first = Path(qk_dbtools.list_backups()[0]["path"])
+        stamp = time.time() - 3601
+        os.utime(first, (stamp, stamp))
+        self.assertTrue(qk_dbtools._scheduler_tick())
+        self.assertEqual(len(qk_dbtools.list_backups()), 1)
+        self.assertFalse(first.exists())
 
     def test_start_scheduler_returns_daemon_thread(self):
+        # A real daemon must not outlive the fixture and read later tests' config.
+        import subprocess
+        import sys
         qk_config.save({"backup": {"enabled": False}})
-        t = qk_dbtools.start_backup_scheduler()
-        self.assertTrue(t.daemon and t.is_alive())
-        self.assertIs(qk_dbtools.start_backup_scheduler(), t)
+        subprocess.run([sys.executable, "-c", """
+import qk_dbtools
+thread = qk_dbtools.start_backup_scheduler()
+assert thread.daemon and thread.is_alive()
+assert qk_dbtools.start_backup_scheduler() is thread
+"""], env=dict(os.environ), check=True, timeout=10)
 
 LOG_DDL = (
     "CREATE TABLE operation_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL, "

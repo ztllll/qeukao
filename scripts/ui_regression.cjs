@@ -417,6 +417,30 @@ const post = async (path, body, cookie) => {
   await page.waitForTimeout(600); liveReqs = 0; await page.waitForTimeout(9000);
   check(liveReqs >= 2 && liveReqs <= 4, "请求挂起期间切视图后只剩一条 3 秒轮询链：9 秒内 live 请求 " + liveReqs + " 次 (单链 2..4；0 次=轮询停了，双链会到 6+)");
   await page.unroute("**/api/admin/live");
+  // ⑳ Excel 上传导入：导出的 xlsx 选进 <input type=file> → 预览 → 导入 → 成功提示且明细表多了记录；换文件清空旧预览
+  {
+    const ck = (await post("/api/admin/login", { password: "112233" })).cookie;
+    const total = async () => (await (await fetch(base + "/api/admin/reports?pageSize=1", { headers: { Cookie: ck } })).json()).data.total;
+    const exported = Buffer.from(await (await fetch(base + "/api/admin/reports/export", { headers: { Cookie: ck } })).arrayBuffer());
+    const file = require("node:os").tmpdir() + "/qk-uireg-import-" + Date.now() + ".xlsx";
+    require("node:fs").writeFileSync(file, exported);
+    await page.click('[data-nav="data"]'); await page.waitForTimeout(600);
+    const before = await total();
+    const state0 = await page.evaluate(() => ({ preview: document.querySelector("#previewExcelButton").disabled, imp: document.querySelector("#importExcelButton").disabled }));
+    await page.setInputFiles("#excelFileInput", file);
+    await page.click("#previewExcelButton"); await page.waitForSelector("#excelPreviewSummary:not(.hidden)", { timeout: 8000 });
+    const ready = await page.evaluate(() => ({ imp: document.querySelector("#importExcelButton").disabled, rows: document.querySelector("#excelPreviewSummary").textContent }));
+    await page.click("#importExcelButton"); await page.waitForTimeout(400);
+    await page.evaluate(() => document.querySelector("#adminDialogConfirm").click()); await page.waitForTimeout(1500);
+    const msg = (await page.textContent("#adminMessage")).trim();
+    const after = await total();
+    check(state0.preview && state0.imp && !ready.imp && /Excel 导入完成/.test(msg) && after > before,
+      "Excel 上传导入：没选文件预览不可点；选文件→预览→导入，出现成功消息且记录增加 (" + JSON.stringify({ state0, ready: ready.imp, msg, before, after }) + ")");
+    await page.setInputFiles("#excelFileInput", []);
+    const cleared = await page.evaluate(() => ({ imp: document.querySelector("#importExcelButton").disabled, prev: document.querySelector("#previewExcelButton").disabled, empty: !document.querySelector("#excelPreviewEmpty").classList.contains("hidden") }));
+    check(cleared.imp && cleared.prev && cleared.empty, "换/清空文件：旧预览被清空，导入不可点 " + JSON.stringify(cleared));
+    require("node:fs").unlinkSync(file);
+  }
   // ③ expired session + change password
   await page.click('[data-nav="settings"]'); await page.waitForTimeout(400);
   await page.fill("#pwOld", "wrong-old"); await page.fill("#pwNew", "abcd1234"); await page.fill("#pwConfirm", "abcd1234");

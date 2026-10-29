@@ -72,7 +72,9 @@ def describe_start_error(exc, port):
 
 
 def op_backup():
-    return str(qk_dbtools.backup_database())
+    path = qk_dbtools.backup_database()
+    qk_dbtools.cleanup_old_backups(dest_dir=path.parent, protect_path=path)
+    return str(path)
 
 
 def op_export(dest):
@@ -90,15 +92,30 @@ def op_import(src):
     return True, "导入成功，共 %s 条上报记录。\n导入前已自动备份到：\n%s" % (r.get("reportCount"), r.get("backupPath"))
 
 
-def save_backup_settings(enabled, every_days, retention_days):
+def save_backup_settings(enabled, every, retention_days, directory="", unit="天", keep_count=0):
+    import tempfile
     try:
-        every = int(str(every_days).strip())
-        keep = int(str(retention_days).strip())
+        hours = int(str(every).strip()) * (24 if unit == "天" else 1)
+        days = int(str(retention_days).strip())
+        count = int(str(keep_count).strip())
     except ValueError:
-        raise ValueError("备份周期和保留天数必须是整数")
-    if every < 1 or keep < 1:
-        raise ValueError("备份周期和保留天数必须 ≥ 1")
-    qk_config.save({"backup": {"enabled": bool(enabled), "everyDays": every, "retentionDays": keep}})
+        raise ValueError("备份周期、保留天数和个数必须是整数")
+    if unit not in ("小时", "天") or not 1 <= hours <= 8760:
+        raise ValueError("备份周期应为 1–8760 小时（1–365 天）")
+    if not 0 <= days <= 3650 or not 0 <= count <= 1000:
+        raise ValueError("保留天数应为 0–3650，个数应为 0–1000（0 表示不限制）")
+    default = os.path.abspath(qk_config.BASE_DIR / "backups")
+    folder = os.path.abspath(str(directory).strip() or default)
+    try:
+        os.makedirs(folder, exist_ok=True)
+        with tempfile.TemporaryFile(prefix=".qeukao-write-check-", dir=folder) as probe:
+            probe.write(b"backup write check")
+            probe.flush()
+            os.fsync(probe.fileno())
+    except OSError as e:
+        raise ValueError("备份目录无法创建或不可写，请选择其他目录：%s" % e)
+    qk_config.save({"backup": {"enabled": bool(enabled), "dir": "" if folder == default else folder,
+                               "everyHours": hours, "retentionDays": days, "keepCount": count}})
 
 
 def validate_rule_input(octet_text, prefix_text):
@@ -221,6 +238,12 @@ def build_gui(preferred_port=None):
             self.ctl = ServerController()
             self.root = tk.Tk()
             self.root.title("缺考上报系统 - 服务端")
+            resource_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+            try:
+                self._icon = tk.PhotoImage(file=os.path.join(resource_dir, "assets", "qeukao.png"))
+                self.root.iconphoto(True, self._icon)
+            except (tk.TclError, OSError):
+                pass  # Optional branding must never prevent startup.
             self.root.minsize(760, 640)
             self.root.geometry("820x700")
             self._closing = False
@@ -348,16 +371,32 @@ def build_gui(preferred_port=None):
             a = self.card(p, "自动备份")
             b = qk_config.load().get("backup", {})
             self.auto_var = tk.BooleanVar(value=bool(b.get("enabled", True)))
-            self.every_var = tk.StringVar(value=str(b.get("everyDays", 3)))
-            self.keep_var = tk.StringVar(value=str(b.get("retentionDays", 90)))
+            hours = b["everyHours"]
+            self.every_var = tk.StringVar(value=str(hours // 24 if hours % 24 == 0 else hours))
+            self.unit_var = tk.StringVar(value="天" if hours % 24 == 0 else "小时")
+            self.keep_var = tk.StringVar(value=str(b["retentionDays"]))
+            self.count_var = tk.StringVar(value=str(b["keepCount"]))
+            self.backup_path_var = tk.StringVar(value=backup_dir())
+            path_row = ttk.Frame(a); path_row.pack(fill="x", pady=(0, 6))
+            ttk.Label(path_row, text="保存目录：").pack(side="left")
+            ttk.Entry(path_row, textvariable=self.backup_path_var, state="readonly").pack(side="left", fill="x", expand=True)
+            ttk.Button(path_row, text="选择…", command=self.choose_backup_dir).pack(side="left", padx=4)
+            ttk.Button(path_row, text="恢复默认", command=lambda: self.backup_path_var.set(str(qk_config.BASE_DIR / "backups"))).pack(side="left")
             r = ttk.Frame(a); r.pack(fill="x")
             ttk.Checkbutton(r, text="启用自动备份", variable=self.auto_var).pack(side="left")
             ttk.Label(r, text="　每").pack(side="left")
-            ttk.Spinbox(r, from_=1, to=365, width=4, textvariable=self.every_var).pack(side="left")
-            ttk.Label(r, text="天，保留").pack(side="left")
-            ttk.Spinbox(r, from_=1, to=3650, width=5, textvariable=self.keep_var).pack(side="left")
-            ttk.Label(r, text="天").pack(side="left")
-            ttk.Button(r, text="保存", command=self.save_backup_cfg).pack(side="left", padx=10)
+            ttk.Spinbox(r, from_=1, to=8760, width=5, textvariable=self.every_var).pack(side="left")
+            ttk.Combobox(r, textvariable=self.unit_var, values=("小时", "天"), state="readonly", width=4).pack(side="left", padx=4)
+            ttk.Button(r, text="保存", command=self.save_backup_cfg).pack(side="right")
+            r = ttk.Frame(a); r.pack(fill="x", pady=6)
+            ttk.Label(r, text="保留").pack(side="left")
+            ttk.Spinbox(r, from_=0, to=3650, width=5, textvariable=self.keep_var).pack(side="left", padx=4)
+            ttk.Label(r, text="天，最多保留").pack(side="left")
+            ttk.Spinbox(r, from_=0, to=1000, width=5, textvariable=self.count_var).pack(side="left", padx=4)
+            ttk.Label(r, text="个（0 = 不限制）").pack(side="left")
+            ttk.Label(a, text="先按天数再按个数清理；导入前安全备份仅按天数清理。", style="Muted.TLabel").pack(anchor="w")
+            self.next_backup_lbl = ttk.Label(a, text="", style="Muted.TLabel")
+            self.next_backup_lbl.pack(anchor="w", pady=(4, 0))
 
             l = ttk.LabelFrame(p, text=" 最近备份 ", padding=6); l.pack(fill="both", expand=True)
             cols = ("name", "size", "time")
@@ -508,6 +547,15 @@ def build_gui(preferred_port=None):
                 items = qk_dbtools.list_backups()
             except Exception:
                 items = []
+            cfg = qk_config.load()["backup"]
+            if not cfg["enabled"]:
+                next_text = "下次自动备份：已停用"
+            elif not items or qk_dbtools.backup_due(time.time(), items[0]["mtime"], cfg["everyHours"]):
+                next_text = "下次自动备份：1 分钟内"
+            else:
+                due = items[0]["mtime"] + cfg["everyHours"] * 3600
+                next_text = "下次自动备份：约 " + datetime.fromtimestamp(due).strftime("%Y-%m-%d %H:%M")
+            self.next_backup_lbl.configure(text=next_text)
             for it in items[:50]:
                 self.tree.insert("", "end", values=(it["name"], format_size(it["size"]), format_mtime(it["mtime"])))
 
@@ -546,12 +594,20 @@ def build_gui(preferred_port=None):
             err = open_in_file_manager(backup_dir())
             if err: messagebox.showerror("打开失败", err)
 
+        def choose_backup_dir(self):
+            path = filedialog.askdirectory(title="选择备份目录", initialdir=self.backup_path_var.get(), mustexist=False)
+            if path:
+                self.backup_path_var.set(path)
+
         def save_backup_cfg(self):
             try:
-                save_backup_settings(self.auto_var.get(), self.every_var.get(), self.keep_var.get())
+                save_backup_settings(self.auto_var.get(), self.every_var.get(), self.keep_var.get(),
+                                     self.backup_path_var.get(), self.unit_var.get(), self.count_var.get())
             except ValueError as e:
                 messagebox.showerror("设置无效", str(e)); return
-            self.say("自动备份设置已保存", "Ok.TLabel")
+            self.backup_path_var.set(backup_dir())
+            self.refresh_backups()
+            self.say("自动备份设置已保存，1 分钟内生效；旧目录备份不搬移、不清理", "Ok.TLabel")
 
         # ---- 密码 ----
         def refresh_password_hint(self):
@@ -602,6 +658,7 @@ def build_gui(preferred_port=None):
             if self._closing:
                 return
             self.refresh_clients()
+            self.refresh_backups()
             self.root.after(3000, self._tick)
 
         def on_close(self):
@@ -669,8 +726,39 @@ def selftest():
         c2 = ServerController()
         err = c2.start(port)
         check(err and "占用" in err, "占用端口应返回中文提示: %r" % (err,))
+        # Drive the actual choose → save → manual backup path without modal dialogs.
+        from tkinter import filedialog, messagebox
+        from unittest.mock import patch
+        selected = os.path.join(scratch, "chosen", "backups")
+        old_dir = backup_dir()
+        old_files = {it["path"] for it in qk_dbtools.list_backups()}
+        with patch.object(filedialog, "askdirectory", return_value=selected):
+            panel.choose_backup_dir()
+        panel.every_var.set("2"); panel.unit_var.set("小时")
+        panel.keep_var.set("0"); panel.count_var.set("1")
+        panel.save_backup_cfg()
+        check(backup_dir() == selected, "选目录保存未生效")
+        check("1 分钟内" in panel.next_backup_lbl.cget("text"), "新目录从未备份提示")
+        check(all(os.path.exists(p) for p in old_files), "切目录不得清理旧备份")
+        check(not qk_dbtools.list_backups(), "列表应切到新目录")
+        # A real unwritable filesystem path, not chmod (root can bypass chmod).
+        blocker = os.path.join(scratch, "not-a-directory")
+        with open(blocker, "w") as f: f.write("block")
+        before = qk_config.CONFIG_PATH.read_bytes()
+        panel.backup_path_var.set(os.path.join(blocker, "backups"))
+        with patch.object(messagebox, "showerror") as error:
+            panel.save_backup_cfg()
+            check(error.called and "不可写" in error.call_args.args[1], "目录错误应中文提示")
+        check(qk_config.CONFIG_PATH.read_bytes() == before, "不可写目录不得落盘")
+        panel.backup_path_var.set(selected)
+        b = op_backup(); check(os.path.dirname(b) == selected and os.path.exists(b), "备份没有落到新目录")
+        b2 = op_backup()
+        check(os.path.exists(b2) and not os.path.exists(b), "立即备份后应按个数清理，保留本次备份")
+        panel.refresh_backups()
+        check(len(panel.tree.get_children()) == 1, "备份清理后列表未刷新")
+        check("约 " in panel.next_backup_lbl.cget("text"), "下次备份时间未显示")
+        check(old_dir != selected, "目录测试未切换")
         # 备份/导出/导入纯函数
-        b = op_backup(); check(os.path.exists(b), "备份文件不存在")
         d = scratch
         e = op_export(os.path.join(d, "x.sqlite3")); check(os.path.exists(e), "导出失败")
         okk, msg = op_import(e); check(okk, "导入自身导出应成功: " + msg)

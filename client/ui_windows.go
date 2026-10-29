@@ -51,10 +51,20 @@ var (
 	popupCallback    = syscall.NewCallback(popupProc)
 )
 
+// rsrc v0.10.2 without a manifest assigns RT_GROUP_ICON ID 1.
+func applicationIcon(size uintptr) uintptr {
+	instance, _, _ := kernel32.NewProc("GetModuleHandleW").Call(0)
+	icon, _, _ := user32.NewProc("LoadImageW").Call(instance, 1, 1, size, size, 0x8000) // IMAGE_ICON, LR_SHARED
+	if icon == 0 {
+		icon, _, _ = user32.NewProc("LoadIconW").Call(0, 32512)
+	}
+	return icon
+}
+
 func registerClass(name string, callback uintptr) error {
 	instance, _, _ := kernel32.NewProc("GetModuleHandleW").Call(0)
 	cursor, _, _ := user32.NewProc("LoadCursorW").Call(0, 32512)
-	wc := wndClass{Size: uint32(unsafe.Sizeof(wndClass{})), Proc: callback, Instance: instance, Cursor: cursor, Name: wide(name)}
+	wc := wndClass{Size: uint32(unsafe.Sizeof(wndClass{})), Proc: callback, Instance: instance, Icon: applicationIcon(32), SmallIcon: applicationIcon(16), Cursor: cursor, Name: wide(name)}
 	atom, _, err := user32.NewProc("RegisterClassExW").Call(uintptr(unsafe.Pointer(&wc)))
 	if atom == 0 && err != syscall.Errno(1410) {
 		return err
@@ -346,7 +356,7 @@ func runTray() {
 	trayWindow.Store(hwnd)
 	registered, _, _ := user32.NewProc("RegisterWindowMessageW").Call(uintptr(wp("TaskbarCreated")))
 	taskbarCreated = uint32(registered)
-	icon, _, _ := user32.NewProc("LoadIconW").Call(0, 32512)
+	icon := applicationIcon(16)
 	trayData = notifyIcon{Size: uint32(unsafe.Sizeof(notifyIcon{})), Window: hwnd, ID: 1, Flags: 1 | 2 | 4, Callback: 0x8021, Icon: icon}
 	notifyTray(0)
 	defer notifyTray(2)
